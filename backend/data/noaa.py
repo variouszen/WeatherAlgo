@@ -8,7 +8,9 @@ import numpy as np
 import sys, os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import NOAA_BASE, NOAA_HEADERS, CITIES, TEMP_THRESHOLDS
+from config import NOAA_BASE, NOAA_HEADERS, CITIES, TEMP_THRESHOLDS_F, TEMP_THRESHOLDS_C, TEMP_THRESHOLDS
+
+OPEN_METEO_BASE = "https://api.open-meteo.com/v1"
 
 logger = logging.getLogger(__name__)
 
@@ -131,50 +133,143 @@ def compute_confidence(sigma: float) -> float:
     return round(float(np.clip(1.0 - (sigma - 3.0) / 10.0, 0.50, 0.95)), 3)
 
 
+async def fetch_openmeteo_forecast(lat: float, lon: float, day_offset: int, client: httpx.AsyncClient) -> Optional[dict]:
+    """
+    Fetch daily high temperature from Open-Meteo for international cities.
+    Returns temp in °C.
+    """
+    try:
+        r = await client.get(
+            f"{OPEN_METEO_BASE}/forecast",
+            params={
+                "latitude": lat,
+                "longitude": lon,
+                "daily": "temperature_2m_max,temperature_2m_min",
+                "timezone": "auto",
+                "forecast_days": 3,
+            },
+            timeout=12.0,
+        )
+        r.raise_for_status()
+        data = r.json()
+        daily = data.get("daily", {})
+        highs = daily.get("temperature_2m_max", [])
+        lows  = daily.get("temperature_2m_min", [])
+        if len(highs) > day_offset:
+            return {
+                "high_c": float(highs[day_offset]),
+                "low_c":  float(lows[day_offset]) if len(lows) > day_offset else None,
+            }
+        return None
+    except Exception as e:
+        logger.warning(f"[OpenMeteo] fetch failed ({lat},{lon}): {e}")
+        return None
+
+
+async def get_openmeteo_observation(lat: float, lon: float, client: httpx.AsyncClient) -> Optional[float]:
+    """Get current temperature in °C from Open-Meteo (hourly, latest)."""
+    try:
+        r = await client.get(
+            f"{OPEN_METEO_BASE}/forecast",
+            params={
+                "latitude": lat,
+                "longitude": lon,
+                "hourly": "temperature_2m",
+                "timezone": "auto",
+                "forecast_days": 1,
+            },
+            timeout=12.0,
+        )
+        r.raise_for_status()
+        data = r.json()
+        temps = data.get("hourly", {}).get("temperature_2m", [])
+        if temps:
+            return float(temps[-1])  # latest hour
+        return None
+    except Exception:
+        return None
+
+
 async def fetch_city_forecast(city: dict, day_offset: int, client: httpx.AsyncClient) -> Optional[dict]:
-    """Full pipeline for one city: point → forecast → parse → probabilities."""
+    """Full pipeline for one city: uses NOAA for US, Open-Meteo for international."""
     lat, lon = city["lat"], city["lon"]
+    is_celsius = city.get("celsius", False)
+    thresholds = TEMP_THRESHOLDS_C if is_celsius else TEMP_THRESHOLDS_F
 
-    point = await get_point_data(lat, lon, client)
-    if not point:
-        return None
+    if is_celsius:
+        # ── International: Open-Meteo ─────────────────────────────────────────
+        om = await fetch_openmeteo_forecast(lat, lon, day_offset, client)
+        if not om:
+            return None
 
-    periods = await get_forecast_periods(point["forecast_url"], client)
-    if not periods:
-        return None
+        forecast_high = om["high_c"]  # °C
+        forecast_low  = om.get("low_c")
+        sigma = compute_sigma(day_offset)
+        confidence = compute_confidence(sigma)
+        current_obs = await get_openmeteo_observation(lat, lon, client)
 
-    temps = parse_high_low(periods, day_offset)
-    if temps["high"] is None:
-        return None
+        bucket_probs = {t: round(prob_above(t, forecast_high, sigma), 4) for t in thresholds}
 
-    sigma = compute_sigma(day_offset)
-    confidence = compute_confidence(sigma)
+        return {
+            "city": city["name"],
+            "station": city["station"],
+            "lat": lat,
+            "lon": lon,
+            "forecast_high_f": forecast_high,   # °C stored in this field for intl cities
+            "forecast_high_c": forecast_high,
+            "forecast_low_f": forecast_low,
+            "condition": f"Day +{day_offset}",
+            "detailed_forecast": "",
+            "day_offset": day_offset,
+            "sigma": sigma,
+            "confidence": confidence,
+            "bucket_probs": bucket_probs,
+            "current_obs_f": current_obs,        # °C for intl
+            "unit": "C",
+            "source": "Open-Meteo",
+        }
 
-    # Compute prob for every threshold
-    bucket_probs = {
-        t: round(prob_above(t, temps["high"], sigma), 4)
-        for t in TEMP_THRESHOLDS
-    }
+    else:
+        # ── US: NOAA/NWS ──────────────────────────────────────────────────────
+        point = await get_point_data(lat, lon, client)
+        if not point:
+            return None
 
-    # Current observation (for calibration — may be None outside station hours)
-    current_obs = await get_latest_observation(city["station"], client)
+        periods = await get_forecast_periods(point["forecast_url"], client)
+        if not periods:
+            return None
 
-    return {
-        "city": city["name"],
-        "station": city["station"],
-        "lat": lat,
-        "lon": lon,
-        "forecast_high_f": temps["high"],
-        "forecast_low_f": temps["low"],
-        "condition": temps["high_label"],
-        "detailed_forecast": temps["detailed_forecast"],
-        "day_offset": day_offset,
-        "sigma": sigma,
-        "confidence": confidence,
-        "bucket_probs": bucket_probs,      # {threshold: prob}
-        "current_obs_f": current_obs,       # Real observed temp right now
-        "source": "NOAA/NWS",
-    }
+        temps = parse_high_low(periods, day_offset)
+        if temps["high"] is None:
+            return None
+
+        sigma = compute_sigma(day_offset)
+        confidence = compute_confidence(sigma)
+
+        bucket_probs = {
+            t: round(prob_above(t, temps["high"], sigma), 4)
+            for t in TEMP_THRESHOLDS_F
+        }
+
+        current_obs = await get_latest_observation(city["station"], client)
+
+        return {
+            "city": city["name"],
+            "station": city["station"],
+            "lat": lat,
+            "lon": lon,
+            "forecast_high_f": temps["high"],
+            "forecast_low_f": temps["low"],
+            "condition": temps["high_label"],
+            "detailed_forecast": temps["detailed_forecast"],
+            "day_offset": day_offset,
+            "sigma": sigma,
+            "confidence": confidence,
+            "bucket_probs": bucket_probs,
+            "current_obs_f": current_obs,
+            "unit": "F",
+            "source": "NOAA/NWS",
+        }
 
 
 async def fetch_all_cities(day_offset: int = 0) -> list[dict]:
@@ -189,7 +284,8 @@ async def fetch_all_cities(day_offset: int = 0) -> list[dict]:
         for city, result in zip(CITIES, raw):
             if isinstance(result, dict):
                 results.append(result)
-                logger.info(f"[NOAA] {city['name']}: {result['forecast_high_f']}°F (σ={result['sigma']})")
+                unit = result.get("unit", "F")
+                logger.info(f"[Forecast] {city['name']}: {result['forecast_high_f']}°{unit} (σ={result['sigma']})")
             else:
-                logger.warning(f"[NOAA] {city['name']}: failed — {result}")
+                logger.warning(f"[Forecast] {city['name']}: failed — {result}")
     return results

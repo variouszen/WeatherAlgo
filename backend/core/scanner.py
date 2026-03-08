@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import sys, os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import BOT_CONFIG, CITIES, TEMP_THRESHOLDS
+from config import BOT_CONFIG, CITIES, TEMP_THRESHOLDS_F, TEMP_THRESHOLDS_C, TEMP_THRESHOLDS
 from data.noaa import fetch_all_cities, get_latest_observation
 import httpx
 from data.polymarket import build_market_map
@@ -121,7 +121,8 @@ async def run_scan() -> dict:
             # ── Step 5: Fetch Polymarket prices (real API) ────────────────────
             log("Fetching Polymarket market prices...")
             try:
-                market_map = await build_market_map(city_names, TEMP_THRESHOLDS)
+            # Pass all thresholds (F and C) — polymarket.py matches per-city unit
+                market_map = await build_market_map(city_names, TEMP_THRESHOLDS_F + TEMP_THRESHOLDS_C)
                 log(f"Polymarket: {len(market_map)} city/threshold markets found")
             except Exception as e:
                 log(f"Polymarket fetch failed: {e}", "WARN")
@@ -142,7 +143,11 @@ async def run_scan() -> dict:
                     log(f"Skip {city} — position already open")
                     continue
 
-                for threshold in TEMP_THRESHOLDS:
+                city_cfg = city_by_name.get(city, {})
+                is_celsius = city_cfg.get("celsius", False)
+                thresholds_for_city = TEMP_THRESHOLDS_C if is_celsius else TEMP_THRESHOLDS_F
+
+                for threshold in thresholds_for_city:
                     mkt_key = (city, threshold)
                     if mkt_key not in market_map:
                         continue

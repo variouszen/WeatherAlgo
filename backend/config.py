@@ -50,20 +50,29 @@ BOT_CONFIG = {
 }
 
 # ── Cities ────────────────────────────────────────────────────────────────────
-# station_id must match what Polymarket uses for resolution
+# station_id: NWS station for US cities; ICAO code for international (Open-Meteo)
+# celsius=True: forecast returned in °C, will be converted for Polymarket bucket matching
 CITIES = [
-    {"name": "New York",      "lat": 40.7128,  "lon": -74.0060,  "station": "KLGA", "emoji": "🗽"},
-    {"name": "Chicago",       "lat": 41.8781,  "lon": -87.6298,  "station": "KORD", "emoji": "🌬️"},
-    {"name": "Seattle",       "lat": 47.6062,  "lon": -122.3321, "station": "KSEA", "emoji": "🌧️"},
-    {"name": "Atlanta",       "lat": 33.7490,  "lon": -84.3880,  "station": "KFTY", "emoji": "🍑"},
-    {"name": "Dallas",        "lat": 32.7767,  "lon": -96.7970,  "station": "KDFW", "emoji": "🤠"},
-    {"name": "Miami",         "lat": 25.7617,  "lon": -80.1918,  "station": "KMIA", "emoji": "🌴"},
-    {"name": "Boston",        "lat": 42.3601,  "lon": -71.0589,  "station": "KBOS", "emoji": "🦞"},
-    {"name": "Philadelphia",  "lat": 39.9526,  "lon": -75.1652,  "station": "KPHL", "emoji": "🔔"},
+    {"name": "New York",      "lat": 40.7128,  "lon": -74.0060,  "station": "KLGA", "emoji": "🗽",  "celsius": False},
+    {"name": "Chicago",       "lat": 41.8781,  "lon": -87.6298,  "station": "KORD", "emoji": "🌬️", "celsius": False},
+    {"name": "Seattle",       "lat": 47.6062,  "lon": -122.3321, "station": "KSEA", "emoji": "🌧️", "celsius": False},
+    {"name": "Atlanta",       "lat": 33.7490,  "lon": -84.3880,  "station": "KFTY", "emoji": "🍑",  "celsius": False},
+    {"name": "Dallas",        "lat": 32.7767,  "lon": -96.7970,  "station": "KDFW", "emoji": "🤠",  "celsius": False},
+    {"name": "Miami",         "lat": 25.7617,  "lon": -80.1918,  "station": "KMIA", "emoji": "🌴",  "celsius": False},
+    {"name": "Boston",        "lat": 42.3601,  "lon": -71.0589,  "station": "KBOS", "emoji": "🦞",  "celsius": False},
+    {"name": "Philadelphia",  "lat": 39.9526,  "lon": -75.1652,  "station": "KPHL", "emoji": "🔔",  "celsius": False},
+    # International — forecast via Open-Meteo; Polymarket markets quote in °C buckets
+    {"name": "London",        "lat": 51.4775,  "lon": -0.4614,   "station": "EGLL", "emoji": "🎡",  "celsius": True},
+    {"name": "Seoul",         "lat": 37.5665,  "lon": 126.9780,  "station": "RKSS", "emoji": "🏮",  "celsius": True},
 ]
 
-# ── Temperature thresholds to scan ────────────────────────────────────────────
-TEMP_THRESHOLDS = [40, 45, 50, 55, 60, 62, 64, 65, 66, 67, 68, 69, 70, 72, 75, 80]
+# ── Temperature thresholds to scan (°F for US, °C for international) ──────────
+# US cities use these Fahrenheit buckets
+TEMP_THRESHOLDS_F = [40, 45, 50, 55, 60, 62, 64, 65, 66, 67, 68, 69, 70, 72, 75, 80, 85, 90]
+# International cities use these Celsius buckets (Polymarket quotes in °C)
+TEMP_THRESHOLDS_C = [-5, 0, 2, 4, 5, 6, 7, 8, 9, 10, 12, 14, 15, 16, 17, 18, 20, 22, 25, 28, 30]
+# Legacy alias used throughout codebase — points to °F list (US default)
+TEMP_THRESHOLDS = TEMP_THRESHOLDS_F
 
 # ── NOAA ──────────────────────────────────────────────────────────────────────
 NOAA_BASE = "https://api.weather.gov"
