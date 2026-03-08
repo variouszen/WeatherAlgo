@@ -61,9 +61,10 @@ async def fetch_weather_markets(client: httpx.AsyncClient) -> list[dict]:
     seen_ids: set = set()
 
     search_queries = [
-        {"tag_slug": "weather", "limit": 200},
-        {"keyword": "highest temperature", "limit": 100},
-        {"keyword": "daily temperature", "limit": 100},
+        {"keyword": "highest temperature", "limit": 200},
+        {"keyword": "highest temperature london", "limit": 50},
+        {"keyword": "highest temperature seoul", "limit": 50},
+        {"keyword": "highest temperature nyc", "limit": 50},
     ]
 
     for params in search_queries:
@@ -80,6 +81,7 @@ async def fetch_weather_markets(client: httpx.AsyncClient) -> list[dict]:
             new = [m for m in markets if m.get("id") not in seen_ids]
             all_markets.extend(new)
             seen_ids.update(m.get("id") for m in new)
+            logger.info(f"[POLY] Query {params} → {len(markets)} markets, {len(new)} new")
         except Exception as e:
             logger.warning(f"[POLY] Query {params} failed: {e}")
 
