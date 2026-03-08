@@ -15,6 +15,7 @@ from models.database import (
 )
 from core.signals import get_bankroll
 from core.scanner import run_scan
+import httpx
 
 logging.basicConfig(
     level=logging.INFO,
@@ -318,3 +319,19 @@ def _scan_log_to_dict(s: ScanLog) -> dict:
         "errors": s.errors,
         "duration_ms": s.duration_ms,
     }
+
+
+@app.get("/api/debug/markets")
+async def debug_markets():
+    """Fetch raw Gamma API response to inspect market structure."""
+    async with httpx.AsyncClient() as client:
+        r = await client.get(
+            "https://gamma-api.polymarket.com/markets",
+            params={"active": "true", "closed": "false", "keyword": "highest temperature", "limit": 3},
+            headers={"User-Agent": "WeatherArbBot/1.0", "Accept": "application/json"},
+            timeout=15.0,
+        )
+        data = r.json()
+        markets = data if isinstance(data, list) else data.get("markets", [])
+        # Return first 3 markets raw so we can see exact field names/structure
+        return {"count": len(markets), "sample": markets[:3]}
