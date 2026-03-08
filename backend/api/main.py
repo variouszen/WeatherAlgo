@@ -323,15 +323,44 @@ def _scan_log_to_dict(s: ScanLog) -> dict:
 
 @app.get("/api/debug/markets")
 async def debug_markets():
-    """Fetch raw Gamma API response to inspect market structure."""
+    """Fetch raw Gamma API events to inspect temperature market structure."""
+    results = {}
     async with httpx.AsyncClient() as client:
-        r = await client.get(
-            "https://gamma-api.polymarket.com/markets",
-            params={"active": "true", "closed": "false", "keyword": "highest temperature", "limit": 3},
-            headers={"User-Agent": "WeatherArbBot/1.0", "Accept": "application/json"},
-            timeout=15.0,
-        )
-        data = r.json()
-        markets = data if isinstance(data, list) else data.get("markets", [])
-        # Return first 3 markets raw so we can see exact field names/structure
-        return {"count": len(markets), "sample": markets[:3]}
+        # Check events endpoint
+        for tag in ["daily-temperature", "weather"]:
+            try:
+                r = await client.get(
+                    "https://gamma-api.polymarket.com/events",
+                    params={"active": "true", "closed": "false", "tag_slug": tag, "limit": 2},
+                    headers={"User-Agent": "WeatherArbBot/1.0", "Accept": "application/json"},
+                    timeout=15.0,
+                )
+                data = r.json()
+                events = data if isinstance(data, list) else data.get("events", [])
+                results[f"events_tag_{tag}"] = {
+                    "status": r.status_code,
+                    "count": len(events),
+                    "sample": events[:1]
+                }
+            except Exception as e:
+                results[f"events_tag_{tag}"] = {"error": str(e)}
+
+        # Also check raw markets with daily-temperature tag
+        try:
+            r = await client.get(
+                "https://gamma-api.polymarket.com/markets",
+                params={"active": "true", "closed": "false", "tag_slug": "daily-temperature", "limit": 2},
+                headers={"User-Agent": "WeatherArbBot/1.0", "Accept": "application/json"},
+                timeout=15.0,
+            )
+            data = r.json()
+            markets = data if isinstance(data, list) else data.get("markets", [])
+            results["markets_tag_daily_temperature"] = {
+                "status": r.status_code,
+                "count": len(markets),
+                "sample": markets[:1]
+            }
+        except Exception as e:
+            results["markets_tag_daily_temperature"] = {"error": str(e)}
+
+    return results

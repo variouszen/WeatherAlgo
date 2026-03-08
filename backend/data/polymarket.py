@@ -2,21 +2,15 @@
 """
 Polymarket temperature market fetcher.
 
-Polymarket structures temperature markets as BUCKET RANGE markets, not simple
-yes/no thresholds. Each market is a group of outcomes like:
-  "Highest temperature in NYC on March 8?"
-  Outcomes: ["46-47°F", "48-49°F", "50-51°F", "52°F or higher", ...]
+Temperature markets on Polymarket are structured as EVENTS with multiple
+outcome markets (buckets). Each event like "Highest temperature in NYC on March 9?"
+contains outcomes like "46-47°F", "48-49°F", "52°F or higher".
 
-Each outcome is a separate token with its own yes/no price.
-We fetch all outcomes, parse their bucket ranges, and compute the implied
-cumulative probability of the high being >= a given threshold by summing
-bucket probabilities for all buckets >= that threshold.
-
-Resolution source: Weather Underground (Wunderground), NOT NWS.
+The correct API approach is to query the /events endpoint with tag filtering,
+then extract the nested markets (outcomes) from each event.
 """
 
 import httpx
-import asyncio
 import re
 import logging
 from typing import Optional
@@ -32,7 +26,6 @@ HEADERS = {
     "Accept": "application/json",
 }
 
-# How Polymarket titles cities in their weather markets
 CITY_ALIASES = {
     "New York":      ["new york", "nyc", "new york city"],
     "Chicago":       ["chicago"],
@@ -46,53 +39,79 @@ CITY_ALIASES = {
     "Seoul":         ["seoul"],
 }
 
-# Whether the city's markets quote in °C (international) or °F (US)
 CITY_CELSIUS = {"London", "Seoul"}
 
 
-# ── Gamma API fetching ────────────────────────────────────────────────────────
-
-async def fetch_weather_markets(client: httpx.AsyncClient) -> list[dict]:
+async def fetch_temperature_events(client: httpx.AsyncClient) -> list:
     """
-    Fetch all open temperature/weather markets from Gamma API.
-    Tries multiple queries to maximize coverage.
+    Fetch temperature events from Gamma API /events endpoint.
+    Events contain nested markets (the individual bucket outcomes).
     """
-    all_markets: list[dict] = []
-    seen_ids: set = set()
+    all_events = []
+    seen_ids = set()
 
-    search_queries = [
-        {"keyword": "highest temperature", "limit": 200},
-        {"keyword": "highest temperature london", "limit": 50},
-        {"keyword": "highest temperature seoul", "limit": 50},
-        {"keyword": "highest temperature nyc", "limit": 50},
+    # Query events endpoint with temperature-related tags
+    queries = [
+        {"tag_slug": "daily-temperature", "limit": 200},
+        {"tag_slug": "weather", "limit": 200},
+        {"tag": "temperature", "limit": 200},
     ]
 
-    for params in search_queries:
+    for params in queries:
         try:
             r = await client.get(
-                f"{GAMMA_API_BASE}/markets",
+                f"{GAMMA_API_BASE}/events",
                 params={"active": "true", "closed": "false", **params},
                 headers=HEADERS,
                 timeout=15.0,
             )
-            r.raise_for_status()
+            if r.status_code != 200:
+                logger.warning(f"[POLY] Events query {params} → HTTP {r.status_code}")
+                continue
+            data = r.json()
+            events = data if isinstance(data, list) else data.get("events", [])
+            new = [e for e in events if e.get("id") not in seen_ids and _is_temp_event(e)]
+            all_events.extend(new)
+            seen_ids.update(e.get("id") for e in new)
+            logger.info(f"[POLY] Events query {params} → {len(events)} total, {len(new)} temp events new")
+        except Exception as e:
+            logger.warning(f"[POLY] Events query {params} failed: {e}")
+
+    # Also try fetching markets directly with negRisk flag (temperature markets use negRisk)
+    try:
+        r = await client.get(
+            f"{GAMMA_API_BASE}/markets",
+            params={"active": "true", "closed": "false", "tag_slug": "daily-temperature", "limit": 200},
+            headers=HEADERS,
+            timeout=15.0,
+        )
+        if r.status_code == 200:
             data = r.json()
             markets = data if isinstance(data, list) else data.get("markets", [])
-            new = [m for m in markets if m.get("id") not in seen_ids]
-            all_markets.extend(new)
-            seen_ids.update(m.get("id") for m in new)
-            logger.info(f"[POLY] Query {params} → {len(markets)} markets, {len(new)} new")
-        except Exception as e:
-            logger.warning(f"[POLY] Query {params} failed: {e}")
+            logger.info(f"[POLY] Direct markets tag=daily-temperature → {len(markets)} markets")
+            # Wrap each market as a pseudo-event for unified processing
+            for m in markets:
+                title = m.get("question") or m.get("groupItemTitle") or ""
+                if _is_temp_title(title):
+                    all_events.append({"_raw_market": True, **m})
+    except Exception as e:
+        logger.warning(f"[POLY] Direct markets fetch failed: {e}")
 
-    logger.info(f"[POLY] Total weather markets fetched: {len(all_markets)}")
-    return all_markets
+    logger.info(f"[POLY] Total temperature events/markets: {len(all_events)}")
+    return all_events
 
 
-# ── City / market matching ────────────────────────────────────────────────────
+def _is_temp_event(event: dict) -> bool:
+    title = (event.get("title") or event.get("question") or "").lower()
+    return _is_temp_title(title)
+
+
+def _is_temp_title(title: str) -> bool:
+    tl = title.lower()
+    return ("highest temperature" in tl or "daily temperature" in tl or "high temp" in tl)
+
 
 def match_city(title: str) -> Optional[str]:
-    """Match a market title to one of our tracked cities."""
     tl = title.lower()
     for city, aliases in CITY_ALIASES.items():
         if any(alias in tl for alias in aliases):
@@ -100,56 +119,37 @@ def match_city(title: str) -> Optional[str]:
     return None
 
 
-def is_temperature_market(title: str) -> bool:
-    """Is this a daily high temperature market (not precipitation, wind, etc)?"""
-    tl = title.lower()
-    positive = any(kw in tl for kw in [
-        "highest temperature", "high temperature", "daily temperature",
-        "temperature", "degrees", "°f", "°c",
-    ])
-    negative = any(kw in tl for kw in [
-        "precipitation", "rainfall", "snowfall", "wind", "humidity",
-        "monthly", "weekly", "average", "mean",
-    ])
-    return positive and not negative
-
-
-# ── Bucket range parsing ──────────────────────────────────────────────────────
-
-def parse_bucket_range(outcome_label: str) -> Optional[tuple]:
+def parse_bucket_range(label: str) -> Optional[tuple]:
     """
-    Parse a bucket outcome label into (low, high) temperature bounds.
-    Returns (low, None) for open-ended upper buckets ("52°F or higher", "30°C+").
-    Returns None if unparseable.
-
-    Examples:
-      "46-47°F"       → (46.0, 47.0)
-      "48-49°F"       → (48.0, 49.0)
-      "52°F or higher" → (52.0, None)
-      "Below 40°F"    → (float('-inf'), 40.0)
-      "10-12°C"       → (10.0, 12.0)
-      "30°C or higher" → (30.0, None)
+    Parse bucket outcome label into (low, high).
+    Returns (low, None) for open upper, (None, high) would be open lower.
     """
-    label = outcome_label.strip().lower()
+    s = label.strip().lower()
 
-    # "below X°F/°C" or "under X"
-    m = re.search(r"(?:below|under|less than)\s*(-?\d+(?:\.\d+)?)\s*°?[fc]?", label)
+    # "below X" / "under X"
+    m = re.search(r"(?:below|under|less than)\s*(-?\d+(?:\.\d+)?)", s)
     if m:
         return (float("-inf"), float(m.group(1)))
 
-    # "X or higher / X+" open upper bucket
-    m = re.search(r"(-?\d+(?:\.\d+)?)\s*°?[fc]?\s*(?:or higher|or above|\+)", label)
+    # "X or higher" / "X+" / "X and above"
+    m = re.search(r"(-?\d+(?:\.\d+)?)\s*(?:°?[fc])?\s*(?:or higher|or above|and above|\+|&\s*above)", s)
     if m:
         return (float(m.group(1)), None)
 
-    # "X-Y°F" range  (handles negative with optional minus)
-    m = re.search(r"(-?\d+(?:\.\d+)?)\s*[-–]\s*(-?\d+(?:\.\d+)?)\s*°?[fc]?", label)
+    # "X-Y" range
+    m = re.search(r"(-?\d+(?:\.\d+)?)\s*[-–]\s*(-?\d+(?:\.\d+)?)", s)
     if m:
         lo, hi = float(m.group(1)), float(m.group(2))
         return (min(lo, hi), max(lo, hi))
 
-    # Single value "46°F" (exact bucket)
-    m = re.search(r"(-?\d+(?:\.\d+)?)\s*°?[fc]", label)
+    # Single value "46°f" or "46°c"
+    m = re.search(r"(-?\d+(?:\.\d+)?)\s*°?[fc]", s)
+    if m:
+        v = float(m.group(1))
+        return (v, v)
+
+    # Bare number
+    m = re.search(r"^(-?\d+(?:\.\d+)?)$", s.strip())
     if m:
         v = float(m.group(1))
         return (v, v)
@@ -158,95 +158,62 @@ def parse_bucket_range(outcome_label: str) -> Optional[tuple]:
 
 
 def compute_cumulative_prob(buckets: list, threshold: float) -> Optional[float]:
-    """
-    Given a list of parsed bucket dicts with keys {low, high, price},
-    compute P(high_temp >= threshold) by summing prices of buckets that
-    are entirely at or above the threshold.
-
-    bucket["price"] = market Yes price = market-implied P(this bucket wins).
-    """
     if not buckets:
         return None
-
     total = sum(b["price"] for b in buckets)
-    if total < 0.1:
+    if total < 0.05:
         return None
 
     prob = 0.0
     for b in buckets:
         lo, hi = b["low"], b["high"]
-        p = b["price"] / total  # normalized
+        p = b["price"] / total
 
-        if hi is None:
-            # Open upper bucket: entirely >= lo
+        if hi is None:  # open upper bucket
             if lo >= threshold:
                 prob += p
-        elif lo == float("-inf"):
-            # Sub-threshold (below) bucket: contributes 0
+        elif lo == float("-inf"):  # open lower bucket
             pass
         else:
-            # Normal range bucket [lo, hi]
             if lo >= threshold:
-                prob += p  # entire bucket is above threshold
+                prob += p
             elif hi >= threshold:
-                # Bucket straddles threshold — partial credit
                 width = hi - lo
                 if width > 0:
-                    frac = (hi - threshold) / width
-                    prob += p * frac
+                    prob += p * (hi - threshold) / width
 
     return round(min(max(prob, 0.01), 0.99), 4)
 
 
-# ── CLOB price fetching ───────────────────────────────────────────────────────
-
 async def get_token_midpoint(token_id: str, client: httpx.AsyncClient) -> Optional[float]:
-    """Fetch real-time CLOB midpoint price for a token."""
     try:
         r = await client.get(
             f"{CLOB_API_BASE}/midpoint",
             params={"token_id": token_id},
             headers=HEADERS,
-            timeout=10.0,
+            timeout=8.0,
         )
-        r.raise_for_status()
-        mid = r.json().get("mid")
-        return float(mid) if mid else None
+        if r.status_code == 200:
+            mid = r.json().get("mid")
+            return float(mid) if mid else None
     except Exception:
-        return None
+        pass
+    return None
 
-
-# ── Main market map builder ───────────────────────────────────────────────────
 
 async def build_market_map(cities: list, thresholds: list) -> dict:
     """
-    Fetch all Polymarket weather markets and return:
-    {
-      (city, threshold): {
-        "market_id": str,
-        "yes_price": float,      # implied P(high >= threshold) from buckets
-        "volume": float,
-        "title": str,
-        "buckets": list,
-        "unit": "F" or "C",
-        "price_source": str,
-        "end_date": str,
-      }
-    }
-
-    For US cities thresholds are °F; for London/Seoul they're °C.
-    The scanner passes the appropriate list per city.
+    Build {(city, threshold): market_data} from Polymarket temperature events.
     """
     async with httpx.AsyncClient() as client:
-        markets = await fetch_weather_markets(client)
+        events = await fetch_temperature_events(client)
 
-        market_map: dict = {}
+        market_map = {}
 
-        for mkt in markets:
-            title = mkt.get("question") or mkt.get("title") or ""
-            if not title:
-                continue
-            if not is_temperature_market(title):
+        for event in events:
+            # Get the event title
+            title = event.get("title") or event.get("question") or ""
+            if not _is_temp_title(title):
                 continue
 
             city = match_city(title)
@@ -255,98 +222,104 @@ async def build_market_map(cities: list, thresholds: list) -> dict:
 
             unit = "C" if city in CITY_CELSIUS else "F"
 
-            raw_tokens = mkt.get("tokens", [])
-            raw_outcomes = mkt.get("outcomes", [])
-            outcome_prices = mkt.get("outcomePrices", [])
+            # Get nested markets (outcomes/buckets) from event
+            nested_markets = event.get("markets", [])
 
-            buckets = []
+            # If this is a raw market (not an event), treat it differently
+            if event.get("_raw_market"):
+                nested_markets = [event]
 
-            if raw_tokens:
-                for i, tok in enumerate(raw_tokens):
-                    label = tok.get("outcome", "")
-                    parsed = parse_bucket_range(label)
-                    if parsed is None:
-                        continue
-                    lo, hi = parsed
-
-                    price = None
-                    tok_id = tok.get("token_id")
-                    if tok_id:
-                        price = await get_token_midpoint(tok_id, client)
-                    if price is None and i < len(outcome_prices):
-                        try:
-                            price = float(outcome_prices[i])
-                        except (ValueError, TypeError):
-                            pass
-                    if price is None or price <= 0:
-                        continue
-
-                    buckets.append({
-                        "label": label,
-                        "low": lo,
-                        "high": hi,
-                        "price": price,
-                        "token_id": tok_id,
-                    })
-
-            elif raw_outcomes and outcome_prices:
-                for i, label in enumerate(raw_outcomes):
-                    parsed = parse_bucket_range(label)
-                    if parsed is None:
-                        continue
-                    lo, hi = parsed
-                    try:
-                        price = float(outcome_prices[i])
-                    except (ValueError, TypeError, IndexError):
-                        continue
-                    if price <= 0:
-                        continue
-                    buckets.append({
-                        "label": label,
-                        "low": lo,
-                        "high": hi,
-                        "price": price,
-                        "token_id": None,
-                    })
-
-            if len(buckets) < 2:
-                logger.debug(f"[POLY] Skipping {title[:60]} — only {len(buckets)} parseable buckets")
+            if not nested_markets:
+                logger.debug(f"[POLY] Event '{title[:50]}' has no nested markets")
                 continue
 
-            volume = float(mkt.get("volume") or mkt.get("volumeNum") or 0)
-            market_id = mkt.get("id", "")
+            # Each nested market IS a bucket outcome
+            buckets = []
+            total_volume = 0.0
+            market_id = event.get("id", "")
+            end_date = event.get("endDate", "")
+
+            for nm in nested_markets:
+                bucket_label = nm.get("groupItemTitle") or nm.get("question") or nm.get("title") or ""
+                if not bucket_label:
+                    continue
+
+                parsed = parse_bucket_range(bucket_label)
+                if parsed is None:
+                    logger.debug(f"[POLY] Unparseable bucket: '{bucket_label}'")
+                    continue
+
+                lo, hi = parsed
+
+                # Get price from outcomePrices[0] (Yes price) or clobTokenIds
+                price = None
+                outcome_prices = nm.get("outcomePrices", "[]")
+                if isinstance(outcome_prices, str):
+                    import json
+                    try:
+                        outcome_prices = json.loads(outcome_prices)
+                    except Exception:
+                        outcome_prices = []
+
+                if outcome_prices and len(outcome_prices) > 0:
+                    try:
+                        price = float(outcome_prices[0])
+                    except (ValueError, TypeError):
+                        pass
+
+                # Try CLOB for better price
+                clob_ids = nm.get("clobTokenIds", "[]")
+                if isinstance(clob_ids, str):
+                    import json
+                    try:
+                        clob_ids = json.loads(clob_ids)
+                    except Exception:
+                        clob_ids = []
+
+                if clob_ids:
+                    clob_price = await get_token_midpoint(clob_ids[0], client)
+                    if clob_price is not None:
+                        price = clob_price
+
+                if price is None or price <= 0 or price >= 1:
+                    continue
+
+                vol = float(nm.get("volumeNum") or nm.get("volume") or 0)
+                total_volume += vol
+
+                buckets.append({
+                    "label": bucket_label,
+                    "low": lo,
+                    "high": hi,
+                    "price": price,
+                })
+
+            if len(buckets) < 2:
+                logger.debug(f"[POLY] '{title[:50]}' — only {len(buckets)} valid buckets, skipping")
+                continue
+
+            logger.info(f"[POLY] Matched: {city} | {len(buckets)} buckets | Vol=${total_volume:,.0f} | {title[:55]}")
 
             for thresh in thresholds:
                 cum_prob = compute_cumulative_prob(buckets, thresh)
                 if cum_prob is None:
                     continue
-
                 key = (city, thresh)
-                if key in market_map and market_map[key]["volume"] >= volume:
+                if key in market_map and market_map[key]["volume"] >= total_volume:
                     continue
-
                 market_map[key] = {
-                    "market_id": market_id,
+                    "market_id": str(market_id),
                     "yes_price": cum_prob,
-                    "volume": volume,
+                    "volume": total_volume,
                     "title": title,
                     "buckets": buckets,
                     "unit": unit,
                     "price_source": "CLOB+Gamma",
-                    "end_date": mkt.get("endDate", ""),
+                    "end_date": end_date,
                 }
 
-            logger.info(
-                f"[POLY] Parsed: {city} | {len(buckets)} buckets | "
-                f"Vol=${volume:,.0f} | {title[:55]}"
-            )
-
-        logger.info(f"[POLY] Market map built: {len(market_map)} city/threshold pairs")
+        logger.info(f"[POLY] Market map: {len(market_map)} city/threshold pairs")
         if not market_map:
-            logger.warning(
-                "[POLY] 0 markets matched. Check:\n"
-                "  1. Are daily temp markets active on Polymarket today?\n"
-                "  2. City aliases match Polymarket's exact phrasing?\n"
-                "  3. Bucket outcome format still parseable?"
-            )
+            logger.warning("[POLY] 0 markets matched — temperature events may use a different API structure today")
+
         return market_map
