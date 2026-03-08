@@ -62,7 +62,7 @@ CITIES = [
     {"name": "Boston",        "lat": 42.3601,  "lon": -71.0589,  "station": "KBOS", "emoji": "🦞",  "celsius": False},
     {"name": "Philadelphia",  "lat": 39.9526,  "lon": -75.1652,  "station": "KPHL", "emoji": "🔔",  "celsius": False},
     # International — forecast via Open-Meteo; Polymarket markets quote in °C buckets
-    {"name": "London",        "lat": 51.4775,  "lon": -0.4614,   "station": "EGLL", "emoji": "🎡",  "celsius": True},
+    {"name": "London",        "lat": 51.5033,  "lon": 0.0550,    "station": "EGLC", "emoji": "🎡",  "celsius": True},
     {"name": "Seoul",         "lat": 37.5665,  "lon": 126.9780,  "station": "RKSS", "emoji": "🏮",  "celsius": True},
 ]
 
