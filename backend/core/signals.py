@@ -179,7 +179,6 @@ async def open_paper_trade(
 
     # Deduct from bankroll
     bankroll_state.balance = round(bankroll_state.balance - size, 2)
-    bankroll_state.daily_loss_today = round(bankroll_state.daily_loss_today + size, 2)
 
     await session.flush()
     logger.info(
@@ -220,7 +219,10 @@ async def settle_trade(
         fees = 0.0
         net_pnl = gross_pnl
         status = "LOSS"
-        # No payout, size already deducted at open
+        # Track realized loss for circuit breaker
+        bankroll_state.daily_loss_today = round(
+            bankroll_state.daily_loss_today + trade.position_size_usd, 2
+        )
 
     forecast_error = round(actual_high_f - trade.noaa_forecast_high, 2)
 
@@ -289,7 +291,8 @@ async def log_calibration(
 async def reset_daily_loss(session: AsyncSession, bankroll_state: BankrollState):
     """Reset daily loss counter if it's a new day."""
     today = date.today().isoformat()
-    if bankroll_state.last_reset_date != today:
+    last_reset = bankroll_state.last_reset_date or ""
+    if last_reset != today:
         bankroll_state.daily_loss_today = 0.0
         bankroll_state.last_reset_date = today
         logger.info("[BOT] Daily loss counter reset")
