@@ -126,14 +126,13 @@ async def run_scan() -> dict:
                     f"{result['status']} | Net=${result['net_pnl']:+.2f}"
                 )
 
-            # ── Step 4: Log calibration data ───────────────────────────────────
-            for f in forecasts:
-                city_cfg = city_by_name.get(f["city"])
-                if city_cfg:
-                    await log_calibration(
-                        session, f["city"], city_cfg["station"],
-                        f["forecast_high_f"], f.get("current_obs_f"), f["sigma"]
-                    )
+                # ── Log calibration using confirmed daily high ─────────────────
+                # Only log after settlement using the real daily high —
+                # never use current_obs_f (scan-time temp) as calibration truth.
+                await log_calibration(
+                    session, trade.city, city_cfg["station"],
+                    trade.noaa_forecast_high, actual_high, trade.noaa_sigma
+                )
 
             # ── Step 5: Fetch Polymarket prices (real API) ────────────────────
             log("Fetching Polymarket market prices...")
