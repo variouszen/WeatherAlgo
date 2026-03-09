@@ -14,6 +14,7 @@ import httpx
 import re
 import logging
 from typing import Optional
+from datetime import datetime, timezone, timedelta
 import sys, os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -109,6 +110,45 @@ def _is_temp_event(event: dict) -> bool:
 def _is_temp_title(title: str) -> bool:
     tl = title.lower()
     return ("highest temperature" in tl or "daily temperature" in tl or "high temp" in tl)
+
+
+def extract_market_date(title: str) -> Optional[datetime.date]:
+    """
+    Extract date from market title like 'Highest temperature in NYC on March 9?'
+    Returns a date object or None if unparseable.
+    """
+    # Match "Month Day" e.g. "March 9", "February 28"
+    m = re.search(
+        r'\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})\b',
+        title.lower()
+    )
+    if m:
+        month_str, day_str = m.group(1), m.group(2)
+        try:
+            year = datetime.now(timezone.utc).year
+            dt = datetime.strptime(f"{month_str} {day_str} {year}", "%B %d %Y")
+            return dt.date()
+        except ValueError:
+            pass
+    return None
+
+
+def is_valid_market_date(title: str) -> bool:
+    """
+    Return True only if market is for today or tomorrow (UTC).
+    Rejects expired markets and far-future markets.
+    """
+    market_date = extract_market_date(title)
+    if market_date is None:
+        # Can't determine date — skip to be safe
+        logger.debug(f"[POLY] Could not parse date from: '{title[:60]}'")
+        return False
+    today = datetime.now(timezone.utc).date()
+    tomorrow = today + timedelta(days=1)
+    valid = market_date in (today, tomorrow)
+    if not valid:
+        logger.debug(f"[POLY] Skipping stale/future market: '{title[:60]}' (date={market_date})")
+    return valid
 
 
 def match_city(title: str) -> Optional[str]:
@@ -218,6 +258,10 @@ async def build_market_map(cities: list, thresholds: list) -> dict:
 
             city = match_city(title)
             if not city or city not in cities:
+                continue
+
+            # ── Date filter: only trade today's or tomorrow's markets ──────────
+            if not is_valid_market_date(title):
                 continue
 
             unit = "C" if city in CITY_CELSIUS else "F"
