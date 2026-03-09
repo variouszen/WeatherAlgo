@@ -116,7 +116,39 @@ async def reset_daily_loss_endpoint():
     return {"status": "reset", "previous_daily_loss": old_val, "now": 0.0}
 
 
-@app.post("/api/admin/purge-stale-trades")
+@app.post("/api/admin/purge-all-open-trades")
+async def purge_all_open_trades():
+    """Delete ALL open trades and refund their position sizes to bankroll."""
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            bankroll_state = await get_bankroll(session)
+
+            result = await session.execute(
+                select(Trade).where(Trade.status == "OPEN")
+            )
+            open_trades = result.scalars().all()
+
+            purged = []
+            for trade in open_trades:
+                bankroll_state.balance = round(
+                    bankroll_state.balance + trade.position_size_usd, 2
+                )
+                purged.append({
+                    "city": trade.city,
+                    "threshold": trade.threshold_f,
+                    "direction": trade.direction,
+                    "size": trade.position_size_usd,
+                })
+                await session.delete(trade)
+
+            logger.info(f"[PURGE-ALL] Deleted {len(purged)} open trades, bankroll restored to ${bankroll_state.balance}")
+
+    return {
+        "status": "done",
+        "purged_count": len(purged),
+        "bankroll_after": bankroll_state.balance,
+        "purged_trades": purged,
+    }
 async def purge_stale_trades():
     """
     Delete open trades that were entered against expired/stale Polymarket markets.
