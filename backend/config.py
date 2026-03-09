@@ -47,6 +47,10 @@ BOT_CONFIG = {
 
     # Scan interval
     "scan_interval_seconds": 300,  # Every 5 minutes
+
+    # Signal stability (scanner.py)
+    "max_threshold_distance_sigma": 2.0,   # Only evaluate thresholds within ±2σ of forecast
+    "above_forecast_edge_penalty": 0.02,   # Extra edge required per degree YES is above forecast
 }
 
 # ── Cities ────────────────────────────────────────────────────────────────────

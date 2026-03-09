@@ -23,17 +23,25 @@ logger = logging.getLogger(__name__)
 city_names = [c["name"] for c in CITIES]
 city_by_name = {c["name"]: c for c in CITIES}
 
+# ── Signal persistence buffer ─────────────────────────────────────────────────
+# A signal must survive 2 consecutive scans before a position opens.
+# Key: (city, threshold, direction)  →  signal_info dict
+_pending_signals: dict[tuple, dict] = {}
+
 
 async def run_scan() -> dict:
     """
     Full scan cycle:
-    1. Fetch NOAA forecasts (real)
-    2. Fetch Polymarket market prices (real)
-    3. Settle open positions if observations available
-    4. Evaluate new signals
-    5. Open paper trades
-    6. Log everything to Postgres
+    1. Reset daily loss / circuit breaker
+    2. Fetch NOAA forecasts
+    3. Settle open positions (next-day, after 20:00 UTC)
+    4. Fetch Polymarket prices
+    5. Evaluate signals with stability filters
+    6. Confirm signals that appeared in 2 consecutive scans → open trades
+    7. Log to Postgres
     """
+    global _pending_signals
+
     start_ms = int(time.time() * 1000)
     scan_result = {
         "started_at": datetime.utcnow().isoformat(),
@@ -54,7 +62,7 @@ async def run_scan() -> dict:
             bankroll_state = await get_bankroll(session)
             await reset_daily_loss(session, bankroll_state)
 
-            # ── Step 1: Check daily circuit breaker ───────────────────────────
+            # ── Step 1: Circuit breaker ───────────────────────────────────────
             cfg = BOT_CONFIG
             daily_loss_cap = bankroll_state.starting_balance * cfg["daily_loss_cap_pct"]
             if bankroll_state.daily_loss_today >= daily_loss_cap:
@@ -62,7 +70,7 @@ async def run_scan() -> dict:
                 scan_result["errors"].append("Daily loss cap hit")
                 return scan_result
 
-            # ── Step 2: Fetch NOAA (real API) ─────────────────────────────────
+            # ── Step 2: Fetch NOAA ────────────────────────────────────────────
             log("Fetching NOAA forecasts...")
             try:
                 forecasts = await fetch_all_cities(day_offset=0)
@@ -73,27 +81,23 @@ async def run_scan() -> dict:
                 scan_result["errors"].append(f"NOAA: {e}")
                 return scan_result
 
-            forecast_map = {f["city"]: f for f in forecasts}
-
-            # ── Step 3: Settle open positions ──────────────────────────────────
+            # ── Step 3: Settle open positions ─────────────────────────────────
             open_positions = await get_open_positions(session)
             log(f"Open positions: {len(open_positions)}")
 
             now_utc = datetime.utcnow()
             today = now_utc.date()
-            settlement_hour_utc = 20  # Only settle after 8pm UTC (~3-4pm US Eastern)
+            settlement_hour_utc = 20
 
             for trade in open_positions:
                 trade_date = trade.opened_at.date()
 
-                # Rule 1: Never settle same-day trades
                 if trade_date >= today:
                     log(f"Keeping {trade.city} ≥{trade.threshold_f} — opened today, not yet eligible")
                     continue
 
-                # Rule 2: For prior-day trades, wait until after settlement hour UTC
-                if trade_date < today and now_utc.hour < settlement_hour_utc:
-                    log(f"Keeping {trade.city} ≥{trade.threshold_f} — before settlement window (need 8pm UTC)")
+                if now_utc.hour < settlement_hour_utc:
+                    log(f"Keeping {trade.city} ≥{trade.threshold_f} — before settlement window (need 20:00 UTC)")
                     continue
 
                 city_cfg = city_by_name.get(trade.city)
@@ -104,7 +108,6 @@ async def run_scan() -> dict:
                 is_celsius = city_cfg.get("celsius", False)
                 unit = "C" if is_celsius else "F"
 
-                # Fetch final daily high for trade date
                 if is_celsius:
                     actual_high = await get_openmeteo_daily_high(
                         city_cfg["lat"], city_cfg["lon"], trade_date
@@ -115,29 +118,28 @@ async def run_scan() -> dict:
                     )
 
                 if actual_high is None:
-                    log(f"No daily high data for {trade.city} on {trade_date} — keeping open", "WARN")
+                    log(f"No daily high for {trade.city} on {trade_date} — keeping open", "WARN")
                     continue
 
-                result = await settle_trade(session, trade, actual_high, bankroll_state)
+                # Pass city_cfg so settle_trade knows the unit correctly
+                result = await settle_trade(session, trade, actual_high, bankroll_state, city_cfg)
                 scan_result["trades_settled"] += 1
                 log(
-                    f"SETTLED {trade.city} ≥{trade.threshold_f}°{unit} | "
+                    f"SETTLED {trade.city} ≥{trade.threshold_f}°{unit} {trade.direction} | "
                     f"Date={trade_date} | Actual={actual_high}°{unit} | "
                     f"{result['status']} | Net=${result['net_pnl']:+.2f}"
                 )
 
-                # ── Log calibration using confirmed daily high ─────────────────
-                # Only log after settlement using the real daily high —
-                # never use current_obs_f (scan-time temp) as calibration truth.
+                # Calibration keyed to trade_date (not today) using the real daily high
                 await log_calibration(
                     session, trade.city, city_cfg["station"],
-                    trade.noaa_forecast_high, actual_high, trade.noaa_sigma
+                    trade.noaa_forecast_high, actual_high, trade.noaa_sigma,
+                    trade_date=trade_date,
                 )
 
-            # ── Step 5: Fetch Polymarket prices (real API) ────────────────────
+            # ── Step 4: Fetch Polymarket ──────────────────────────────────────
             log("Fetching Polymarket market prices...")
             try:
-            # Pass all thresholds (F and C) — polymarket.py matches per-city unit
                 market_map = await build_market_map(city_names, TEMP_THRESHOLDS_F + TEMP_THRESHOLDS_C)
                 log(f"Polymarket: {len(market_map)} city/threshold markets found")
             except Exception as e:
@@ -145,13 +147,13 @@ async def run_scan() -> dict:
                 scan_result["errors"].append(f"Polymarket: {e}")
                 market_map = {}
 
-            # ── Step 6: Evaluate signals ───────────────────────────────────────
+            # ── Step 5: Evaluate signals ──────────────────────────────────────
             open_after_settle = await get_open_positions(session)
             open_city_set = {t.city for t in open_after_settle}
             open_yes_count = sum(1 for t in open_after_settle if t.direction == "YES")
 
-            # Track best signal per city (avoid multiple trades same city)
-            best_per_city: dict[str, dict] = {}
+            # Signals that pass all filters this scan
+            this_scan_signals: dict[tuple, dict] = {}
 
             for f in forecasts:
                 city = f["city"]
@@ -162,8 +164,21 @@ async def run_scan() -> dict:
                 city_cfg = city_by_name.get(city, {})
                 is_celsius = city_cfg.get("celsius", False)
                 thresholds_for_city = TEMP_THRESHOLDS_C if is_celsius else TEMP_THRESHOLDS_F
+                forecast_high = f["forecast_high_f"]
+                sigma = f.get("sigma", 3.5)
+                unit = f.get("unit", "F")
+
+                # Max threshold distance: only evaluate within ±2σ of forecast
+                max_distance = cfg.get("max_threshold_distance_sigma", 2.0) * sigma
+
+                candidates = []
 
                 for threshold in thresholds_for_city:
+                    # ── Distance filter ───────────────────────────────────────
+                    distance = abs(threshold - forecast_high)
+                    if distance > max_distance:
+                        continue
+
                     mkt_key = (city, threshold)
                     if mkt_key not in market_map:
                         continue
@@ -172,11 +187,19 @@ async def run_scan() -> dict:
                     yes_price = market_data["yes_price"]
                     noaa_prob = f["bucket_probs"].get(threshold, 0)
 
-                    # Determine direction
-                    if noaa_prob > yes_price:
-                        direction = "YES"
-                    else:
-                        direction = "NO"
+                    direction = "YES" if noaa_prob > yes_price else "NO"
+                    edge = abs(noaa_prob - yes_price)
+
+                    # ── Threshold sanity filter ───────────────────────────────
+                    # YES trades above forecast need extra edge as a penalty
+                    above_forecast = threshold > forecast_high
+                    extra_edge_required = 0.0
+                    if direction == "YES" and above_forecast:
+                        extra_edge_required = (threshold - forecast_high) * cfg.get(
+                            "above_forecast_edge_penalty", 0.02
+                        )
+
+                    effective_min_edge = cfg["min_edge"] + extra_edge_required
 
                     should_trade, reason, sizing = evaluate_signal(
                         city=city,
@@ -189,39 +212,97 @@ async def run_scan() -> dict:
                         bankroll=bankroll_state.balance,
                         open_city_positions=list(open_city_set),
                         open_yes_positions=open_yes_count,
+                        min_edge_override=effective_min_edge,
                     )
 
-                    edge = abs(noaa_prob - yes_price)
+                    candidates.append({
+                        "threshold": threshold,
+                        "direction": direction,
+                        "noaa_prob": noaa_prob,
+                        "yes_price": yes_price,
+                        "edge": edge,
+                        "effective_min_edge": effective_min_edge,
+                        "above_forecast": above_forecast,
+                        "kelly_capped": sizing.get("kelly_capped", 0) if should_trade else 0,
+                        "should_trade": should_trade,
+                        "reason": reason,
+                        "sizing": sizing,
+                        "market_data": market_data,
+                    })
 
-                    unit = f.get("unit", "F")
-                    if should_trade:
-                        scan_result["signals_found"] += 1
-                        signal_info = {
-                            "city": city,
-                            "threshold": threshold,
-                            "direction": direction,
-                            "edge": edge,
-                            "noaa_prob": noaa_prob,
-                            "yes_price": yes_price,
-                            "sizing": sizing,
-                            "market_data": market_data,
-                            "forecast": f,
-                        }
-                        # Keep only best edge signal per city
-                        if city not in best_per_city or edge > best_per_city[city]["edge"]:
-                            best_per_city[city] = signal_info
-                        log(
-                            f"SIGNAL {city} ≥{threshold}°{unit} {direction} | "
-                            f"NOAA={noaa_prob:.1%} Mkt={yes_price:.2f} Edge={edge:.1%} | ${sizing.get('size_usd', 0)}"
-                        )
-                    else:
-                        if edge >= 0.05:  # Only log near-misses
-                            log(f"SKIP {city} ≥{threshold}°{unit} | {reason} | Edge={edge:.1%}")
+                # ── Signal audit: log top 3 candidates regardless of filter ───
+                sorted_cands = sorted(candidates, key=lambda x: x["edge"], reverse=True)[:3]
+                for c in sorted_cands:
+                    flag = "✓" if c["should_trade"] else "✗"
+                    above_note = (
+                        f" [ABOVE FORECAST +{c['threshold'] - forecast_high:.1f}°]"
+                        if c["above_forecast"] and c["direction"] == "YES" else ""
+                    )
+                    log(
+                        f"CANDIDATE {flag} {city} ≥{c['threshold']}°{unit} {c['direction']} | "
+                        f"NOAA={c['noaa_prob']:.1%} Mkt={c['yes_price']:.2f} "
+                        f"Edge={c['edge']:.1%}(min {c['effective_min_edge']:.1%}) "
+                        f"Kelly={c['kelly_capped']:.4f}{above_note} | {c['reason']}"
+                    )
+
+                # ── Pick best by kelly_capped (not raw edge) ──────────────────
+                tradeable = [c for c in candidates if c["should_trade"]]
+                if not tradeable:
+                    continue
+
+                best = max(tradeable, key=lambda x: x["kelly_capped"])
+
+                scan_result["signals_found"] += 1
+                sig_key = (city, best["threshold"], best["direction"])
+
+                this_scan_signals[sig_key] = {
+                    "city": city,
+                    "threshold": best["threshold"],
+                    "direction": best["direction"],
+                    "edge": best["edge"],
+                    "kelly_capped": best["kelly_capped"],
+                    "noaa_prob": best["noaa_prob"],
+                    "yes_price": best["yes_price"],
+                    "sizing": best["sizing"],
+                    "market_data": best["market_data"],
+                    "forecast": f,
+                }
+
+                log(
+                    f"SIGNAL {city} ≥{best['threshold']}°{unit} {best['direction']} | "
+                    f"NOAA={best['noaa_prob']:.1%} Mkt={best['yes_price']:.2f} "
+                    f"Edge={best['edge']:.1%} Kelly={best['kelly_capped']:.4f}"
+                )
+
+            # ── Step 6: Persistence check — confirm signals seen 2 scans ──────
+            confirmed_signals: dict[str, dict] = {}
+
+            for sig_key, sig in this_scan_signals.items():
+                city = sig_key[0]
+                if city in open_city_set:
+                    continue
+                if sig_key in _pending_signals:
+                    # Confirmed — appeared in both last scan and this scan
+                    log(
+                        f"CONFIRMED (2-scan) {city} ≥{sig_key[1]}°"
+                        f"{sig['forecast'].get('unit','F')} {sig_key[2]}"
+                    )
+                    if city not in confirmed_signals or \
+                       sig["kelly_capped"] > confirmed_signals[city]["kelly_capped"]:
+                        confirmed_signals[city] = sig
+                else:
+                    log(
+                        f"PENDING (scan 1/2) {city} ≥{sig_key[1]}°"
+                        f"{sig['forecast'].get('unit','F')} {sig_key[2]} — awaiting confirmation"
+                    )
+
+            # Roll pending forward
+            _pending_signals = this_scan_signals
 
             # ── Step 7: Open paper trades ─────────────────────────────────────
-            for city, sig in best_per_city.items():
+            for city, sig in confirmed_signals.items():
                 city_cfg = city_by_name[city]
-                trade = await open_paper_trade(
+                await open_paper_trade(
                     session=session,
                     city=city,
                     station_id=city_cfg["station"],
@@ -236,12 +317,13 @@ async def run_scan() -> dict:
                 if sig["direction"] == "YES":
                     open_yes_count += 1
                 scan_result["trades_opened"] += 1
+                unit = sig["forecast"].get("unit", "F")
                 log(
-                    f"TRADE OPENED: {city} ≥{sig['threshold']}°{sig['forecast'].get('unit','F')} {sig['direction']} | "
+                    f"TRADE OPENED: {city} ≥{sig['threshold']}°{unit} {sig['direction']} | "
                     f"${sig['sizing']['size_usd']} | Bankroll→${bankroll_state.balance:.2f}"
                 )
 
-            # ── Step 8: Log scan to DB ────────────────────────────────────────
+            # ── Step 8: Log scan ──────────────────────────────────────────────
             duration_ms = int(time.time() * 1000) - start_ms
             scan_log = ScanLog(
                 cities_scanned=scan_result["cities_scanned"],

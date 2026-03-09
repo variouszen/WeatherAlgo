@@ -42,16 +42,24 @@ CITY_ALIASES = {
 
 CITY_CELSIUS = {"London", "Seoul"}
 
+# Slippage haircut: assume you get 2% worse than displayed midpoint
+# Makes paper trading closer to live reality on thin markets
+SLIPPAGE_HAIRCUT = 0.02
+
+# Minimum number of valid buckets required to trust reconstruction
+MIN_VALID_BUCKETS = 3
+
+# Minimum total price mass for a bucket set to be considered liquid
+MIN_PRICE_MASS = 0.50
+
 
 async def fetch_temperature_events(client: httpx.AsyncClient) -> list:
     """
     Fetch temperature events from Gamma API /events endpoint.
-    Events contain nested markets (the individual bucket outcomes).
     """
     all_events = []
     seen_ids = set()
 
-    # Query events endpoint with temperature-related tags
     queries = [
         {"tag_slug": "daily-temperature", "limit": 200},
         {"tag_slug": "weather", "limit": 200},
@@ -78,7 +86,7 @@ async def fetch_temperature_events(client: httpx.AsyncClient) -> list:
         except Exception as e:
             logger.warning(f"[POLY] Events query {params} failed: {e}")
 
-    # Also try fetching markets directly with negRisk flag (temperature markets use negRisk)
+    # Also try markets endpoint directly
     try:
         r = await client.get(
             f"{GAMMA_API_BASE}/markets",
@@ -90,7 +98,6 @@ async def fetch_temperature_events(client: httpx.AsyncClient) -> list:
             data = r.json()
             markets = data if isinstance(data, list) else data.get("markets", [])
             logger.info(f"[POLY] Direct markets tag=daily-temperature → {len(markets)} markets")
-            # Wrap each market as a pseudo-event for unified processing
             for m in markets:
                 title = m.get("question") or m.get("groupItemTitle") or ""
                 if _is_temp_title(title):
@@ -115,9 +122,7 @@ def _is_temp_title(title: str) -> bool:
 def extract_market_date(title: str) -> Optional[datetime.date]:
     """
     Extract date from market title like 'Highest temperature in NYC on March 9?'
-    Returns a date object or None if unparseable.
     """
-    # Match "Month Day" e.g. "March 9", "February 28"
     m = re.search(
         r'\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})\b',
         title.lower()
@@ -135,12 +140,10 @@ def extract_market_date(title: str) -> Optional[datetime.date]:
 
 def is_valid_market_date(title: str) -> bool:
     """
-    Return True only if market is for today or tomorrow (UTC).
-    Rejects expired markets and far-future markets.
+    Return True only if market is for today through today+5 days (UTC).
     """
     market_date = extract_market_date(title)
     if market_date is None:
-        # Can't determine date — skip to be safe
         logger.debug(f"[POLY] Could not parse date from: '{title[:60]}'")
         return False
     today = datetime.now(timezone.utc).date()
@@ -162,11 +165,11 @@ def match_city(title: str) -> Optional[str]:
 def parse_bucket_range(label: str) -> Optional[tuple]:
     """
     Parse bucket outcome label into (low, high).
-    Returns (low, None) for open upper, (None, high) would be open lower.
+    Returns (low, None) for open upper, (float('-inf'), high) for open lower.
     """
     s = label.strip().lower()
 
-    # "below X" / "under X"
+    # "below X" / "under X" / "less than X"
     m = re.search(r"(?:below|under|less than)\s*(-?\d+(?:\.\d+)?)", s)
     if m:
         return (float("-inf"), float(m.group(1)))
@@ -182,7 +185,7 @@ def parse_bucket_range(label: str) -> Optional[tuple]:
         lo, hi = float(m.group(1)), float(m.group(2))
         return (min(lo, hi), max(lo, hi))
 
-    # Single value "46°f" or "46°c"
+    # Single value "46°f"
     m = re.search(r"(-?\d+(?:\.\d+)?)\s*°?[fc]", s)
     if m:
         v = float(m.group(1))
@@ -197,9 +200,37 @@ def parse_bucket_range(label: str) -> Optional[tuple]:
     return None
 
 
+def validate_bucket_set(buckets: list) -> tuple[bool, str]:
+    """
+    Quality check before trusting a synthetic cumulative reconstruction.
+    Returns (is_valid, reason).
+    """
+    if len(buckets) < MIN_VALID_BUCKETS:
+        return False, f"Only {len(buckets)} buckets (need {MIN_VALID_BUCKETS})"
+
+    total = sum(b["price"] for b in buckets)
+    if total < MIN_PRICE_MASS:
+        return False, f"Price mass {total:.2f} too low (need {MIN_PRICE_MASS})"
+
+    # Check for at least one bounded range bucket (not just open-ended)
+    has_bounded = any(
+        b["low"] != float("-inf") and b["high"] is not None
+        for b in buckets
+    )
+    if not has_bounded:
+        return False, "No bounded-range buckets found"
+
+    return True, "OK"
+
+
 def compute_cumulative_prob(buckets: list, threshold: float) -> Optional[float]:
+    """
+    Compute P(outcome >= threshold) from Polymarket bucket prices.
+    Applies slippage haircut to the final probability to model real fill cost.
+    """
     if not buckets:
         return None
+
     total = sum(b["price"] for b in buckets)
     if total < 0.05:
         return None
@@ -207,22 +238,29 @@ def compute_cumulative_prob(buckets: list, threshold: float) -> Optional[float]:
     prob = 0.0
     for b in buckets:
         lo, hi = b["low"], b["high"]
-        p = b["price"] / total
+        p = b["price"] / total  # normalize
 
-        if hi is None:  # open upper bucket
+        if hi is None:  # open upper bucket: everything above lo counts
             if lo >= threshold:
                 prob += p
-        elif lo == float("-inf"):  # open lower bucket
+        elif lo == float("-inf"):  # open lower bucket: nothing above threshold here
             pass
         else:
             if lo >= threshold:
-                prob += p
+                prob += p  # full bucket above threshold
             elif hi >= threshold:
+                # Partial bucket: assume uniform distribution within range
                 width = hi - lo
                 if width > 0:
                     prob += p * (hi - threshold) / width
 
-    return round(min(max(prob, 0.01), 0.99), 4)
+    # Apply slippage haircut: the side you're buying gets slightly worse price
+    # YES trade: prob is slightly lower than displayed (market asks more)
+    # NO trade: handled in scanner via (1 - prob)
+    # We conservatively haircut the displayed YES probability
+    prob_with_slippage = prob * (1 - SLIPPAGE_HAIRCUT)
+
+    return round(min(max(prob_with_slippage, 0.01), 0.99), 4)
 
 
 async def get_token_midpoint(token_id: str, client: httpx.AsyncClient) -> Optional[float]:
@@ -251,7 +289,6 @@ async def build_market_map(cities: list, thresholds: list) -> dict:
         market_map = {}
 
         for event in events:
-            # Get the event title
             title = event.get("title") or event.get("question") or ""
             if not _is_temp_title(title):
                 continue
@@ -260,16 +297,12 @@ async def build_market_map(cities: list, thresholds: list) -> dict:
             if not city or city not in cities:
                 continue
 
-            # ── Date filter: only trade today's or tomorrow's markets ──────────
             if not is_valid_market_date(title):
                 continue
 
             unit = "C" if city in CITY_CELSIUS else "F"
 
-            # Get nested markets (outcomes/buckets) from event
             nested_markets = event.get("markets", [])
-
-            # If this is a raw market (not an event), treat it differently
             if event.get("_raw_market"):
                 nested_markets = [event]
 
@@ -277,7 +310,6 @@ async def build_market_map(cities: list, thresholds: list) -> dict:
                 logger.debug(f"[POLY] Event '{title[:50]}' has no nested markets")
                 continue
 
-            # Each nested market IS a bucket outcome
             buckets = []
             total_volume = 0.0
             market_id = event.get("id", "")
@@ -295,7 +327,7 @@ async def build_market_map(cities: list, thresholds: list) -> dict:
 
                 lo, hi = parsed
 
-                # Get price from outcomePrices[0] (Yes price) or clobTokenIds
+                # Get price from outcomePrices or CLOB
                 price = None
                 outcome_prices = nm.get("outcomePrices", "[]")
                 if isinstance(outcome_prices, str):
@@ -311,7 +343,6 @@ async def build_market_map(cities: list, thresholds: list) -> dict:
                     except (ValueError, TypeError):
                         pass
 
-                # Try CLOB for better price
                 clob_ids = nm.get("clobTokenIds", "[]")
                 if isinstance(clob_ids, str):
                     import json
@@ -338,11 +369,16 @@ async def build_market_map(cities: list, thresholds: list) -> dict:
                     "price": price,
                 })
 
-            if len(buckets) < 2:
-                logger.debug(f"[POLY] '{title[:50]}' — only {len(buckets)} valid buckets, skipping")
+            # ── Bucket quality check before using this market ─────────────────
+            is_valid, reason = validate_bucket_set(buckets)
+            if not is_valid:
+                logger.warning(f"[POLY] Skipping '{title[:50]}' — {reason}")
                 continue
 
-            logger.info(f"[POLY] Matched: {city} | {len(buckets)} buckets | Vol=${total_volume:,.0f} | {title[:55]}")
+            logger.info(
+                f"[POLY] Matched: {city} | {len(buckets)} buckets | "
+                f"Vol=${total_volume:,.0f} | {title[:55]}"
+            )
 
             for thresh in thresholds:
                 cum_prob = compute_cumulative_prob(buckets, thresh)
@@ -360,10 +396,11 @@ async def build_market_map(cities: list, thresholds: list) -> dict:
                     "unit": unit,
                     "price_source": "CLOB+Gamma",
                     "end_date": end_date,
+                    "bucket_count": len(buckets),
                 }
 
         logger.info(f"[POLY] Market map: {len(market_map)} city/threshold pairs")
         if not market_map:
-            logger.warning("[POLY] 0 markets matched — temperature events may use a different API structure today")
+            logger.warning("[POLY] 0 markets matched — check API structure")
 
         return market_map

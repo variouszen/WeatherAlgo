@@ -24,28 +24,26 @@ def compute_kelly_size(
     correlated_yes_count: int = 0,
 ) -> dict:
     """
-    Quarter-Kelly with multiple caps.
+    Quarter-Kelly with correlation discount and position caps.
     Returns breakdown dict for transparency.
     """
     cfg = BOT_CONFIG
 
-    # Raw Kelly
+    # Raw Kelly fraction: edge * confidence / (1 - entry_price)
     kelly_raw = (edge * confidence) / max(0.001, 1 - entry_price)
 
     # Quarter-Kelly
     kelly_q = kelly_raw * cfg["kelly_fraction"]
 
-    # Correlation discount: if ≥3 correlated YES positions open, halve sizing
-    correlation_factor = 0.5 if correlated_yes_count >= cfg["max_correlated_yes"] else 1.0
+    # Correlation discount: if ≥ max_correlated_yes YES positions open, halve size
+    correlation_factor = 0.5 if correlated_yes_count >= cfg.get("max_correlated_yes", 3) else 1.0
 
-    # Apply pct cap
+    # Cap at max_position_pct of bankroll
     kelly_capped = min(kelly_q * correlation_factor, cfg["max_position_pct"])
 
-    # Dollar size
+    # Dollar size with min floor and hard cap
     size_raw = bankroll * kelly_capped
-    size = max(cfg["min_position_usd"], round(size_raw, 2))
-
-    # Hard cap: never more than max_position_pct of bankroll
+    size = max(cfg.get("min_position_usd", 10), round(size_raw, 2))
     size = min(size, bankroll * cfg["max_position_pct"])
 
     return {
@@ -70,18 +68,23 @@ def evaluate_signal(
     bankroll: float,
     open_city_positions: list[str],
     open_yes_positions: int,
+    min_edge_override: float = None,  # scanner can pass elevated min_edge for above-forecast YES
 ) -> tuple[bool, str, dict]:
     """
     Run all filters. Returns (should_trade, reason, sizing_info).
+    min_edge_override allows scanner to require higher edge for suspicious signals.
     """
     cfg = BOT_CONFIG
 
     entry_price = market_yes_price if direction == "YES" else (1 - market_yes_price)
     edge = abs(noaa_prob - market_yes_price)
 
-    # Filter 1: Minimum edge
-    if edge < cfg["min_edge"]:
-        return False, f"Edge {edge:.1%} < min {cfg['min_edge']:.1%}", {}
+    # Effective minimum edge (can be raised by scanner for above-forecast YES)
+    effective_min_edge = min_edge_override if min_edge_override is not None else cfg["min_edge"]
+
+    # Filter 1: Minimum edge (potentially elevated)
+    if edge < effective_min_edge:
+        return False, f"Edge {edge:.1%} < min {effective_min_edge:.1%}", {}
 
     # Filter 2: Confidence
     if confidence < cfg["min_confidence"]:
@@ -91,11 +94,11 @@ def evaluate_signal(
     if volume < cfg["min_market_volume"]:
         return False, f"Volume ${volume:,.0f} < min ${cfg['min_market_volume']:,.0f}", {}
 
-    # Filter 4: Price bounds (avoid buying overpriced side)
-    if direction == "YES" and market_yes_price > cfg["max_yes_price"]:
-        return False, f"YES price {market_yes_price:.2f} > max {cfg['max_yes_price']:.2f}", {}
-    if direction == "NO" and market_yes_price < cfg["min_no_price"]:
-        return False, f"NO side: YES price {market_yes_price:.2f} < floor {cfg['min_no_price']:.2f}", {}
+    # Filter 4: Price bounds (avoid buying extreme prices)
+    if direction == "YES" and market_yes_price > cfg.get("max_yes_price", 0.90):
+        return False, f"YES price {market_yes_price:.2f} > max {cfg.get('max_yes_price', 0.90):.2f}", {}
+    if direction == "NO" and market_yes_price < cfg.get("min_no_price", 0.10):
+        return False, f"NO side: YES price {market_yes_price:.2f} < floor {cfg.get('min_no_price', 0.10):.2f}", {}
 
     # Filter 5: One position per city
     if city in open_city_positions:
@@ -108,7 +111,6 @@ def evaluate_signal(
     # All passed — compute sizing
     sizing = compute_kelly_size(edge, entry_price, confidence, bankroll, open_yes_positions)
 
-    # Check we can afford it
     if sizing["size_usd"] > bankroll:
         return False, "Insufficient bankroll for minimum position", {}
 
@@ -155,7 +157,7 @@ async def open_paper_trade(
         station_id=station_id,
         threshold_f=threshold,
         direction=direction,
-        market_condition=f"High ≥ {threshold}°{unit}",
+        market_condition=f"High >= {threshold}{unit}",
         polymarket_market_id=market_data.get("market_id"),
         polymarket_token_id=market_data.get("token_id"),
         market_yes_price=market_data["yes_price"],
@@ -177,13 +179,12 @@ async def open_paper_trade(
     )
     session.add(trade)
 
-    # Deduct from bankroll
     bankroll_state.balance = round(bankroll_state.balance - size, 2)
 
     await session.flush()
     logger.info(
-        f"[TRADE] OPEN {city} ≥{threshold}°{unit} {direction} | "
-        f"Entry={entry_price:.3f} | Size=${size} | Edge={edge:.1%} | Bankroll→${bankroll_state.balance:.2f}"
+        f"[TRADE] OPEN {city} >={threshold}{unit} {direction} | "
+        f"Entry={entry_price:.3f} | Size=${size} | Edge={edge:.1%} | Bankroll->${bankroll_state.balance:.2f}"
     )
     return trade
 
@@ -193,22 +194,21 @@ async def settle_trade(
     trade: Trade,
     actual_high_f: float,
     bankroll_state: BankrollState,
+    city_cfg: dict = None,  # pass city config for correct unit detection
 ) -> dict:
     """
-    Resolve a trade against the actual observed temperature.
+    Resolve a trade against actual observed temperature.
     Apply Polymarket 2% fee on winnings. Update bankroll.
     """
     cfg = BOT_CONFIG
     won = (
         (trade.direction == "YES" and actual_high_f >= trade.threshold_f) or
-        (trade.direction == "NO"  and actual_high_f < trade.threshold_f)
+        (trade.direction == "NO"  and actual_high_f <  trade.threshold_f)
     )
 
     if won:
-        # Gross payout: shares × $1.00
         gross_payout = round(trade.shares * 1.0, 2)
         gross_pnl = round(gross_payout - trade.position_size_usd, 2)
-        # Fee: 2% of gross profit
         fees = round(gross_pnl * cfg["polymarket_fee_pct"], 2)
         net_pnl = round(gross_pnl - fees, 2)
         payout_received = round(gross_payout - fees, 2)
@@ -219,14 +219,12 @@ async def settle_trade(
         fees = 0.0
         net_pnl = gross_pnl
         status = "LOSS"
-        # Track realized loss for circuit breaker
         bankroll_state.daily_loss_today = round(
             bankroll_state.daily_loss_today + trade.position_size_usd, 2
         )
 
     forecast_error = round(actual_high_f - trade.noaa_forecast_high, 2)
 
-    # Update trade record
     trade.status = status
     trade.actual_high_f = actual_high_f
     trade.resolved_at = datetime.utcnow()
@@ -238,12 +236,14 @@ async def settle_trade(
 
     await session.flush()
 
-    unit = "C" if trade.threshold_f != int(trade.threshold_f * 9/5 + 32) and trade.threshold_f < 50 else "F"
+    # Correct unit from city config — no more heuristic guessing
+    is_celsius = city_cfg.get("celsius", False) if city_cfg else False
+    unit = "C" if is_celsius else "F"
 
     logger.info(
-        f"[SETTLE] {trade.city} ≥{trade.threshold_f}°{unit} {trade.direction} | "
-        f"Actual={actual_high_f}°{unit} | {status} | Net P&L=${net_pnl:+.2f} | "
-        f"Forecast error={forecast_error:+.1f}°{unit} | Bankroll→${bankroll_state.balance:.2f}"
+        f"[SETTLE] {trade.city} >={trade.threshold_f}{unit} {trade.direction} | "
+        f"Actual={actual_high_f}{unit} | {status} | Net P&L=${net_pnl:+.2f} | "
+        f"Forecast error={forecast_error:+.1f}{unit} | Bankroll->${bankroll_state.balance:.2f}"
     )
 
     return {
@@ -261,25 +261,28 @@ async def log_calibration(
     forecast_high: float,
     actual_high: Optional[float],
     sigma: float,
+    trade_date: date = None,  # FIXED: use trade date, not today
 ):
-    """Log daily forecast vs actual for calibration analysis."""
-    today = date.today().isoformat()
-    
-    # Check if we already logged today
+    """
+    Log daily forecast vs actual for calibration analysis.
+    Keyed to the trade date so calibration rows are accurate.
+    """
+    cal_date = trade_date.isoformat() if trade_date else date.today().isoformat()
+
     existing = await session.execute(
         select(CityCalibration).where(
             CityCalibration.city == city,
-            CityCalibration.date == today,
+            CityCalibration.date == cal_date,
         )
     )
     if existing.scalar_one_or_none():
-        return  # Already logged today
+        return  # Already logged for this date
 
-    error = round(actual_high - forecast_high, 2) if actual_high else None
+    error = round(actual_high - forecast_high, 2) if actual_high is not None else None
     cal = CityCalibration(
         city=city,
         station_id=station_id,
-        date=today,
+        date=cal_date,
         forecast_high_f=forecast_high,
         actual_high_f=actual_high,
         forecast_error_f=error,
@@ -289,7 +292,7 @@ async def log_calibration(
 
 
 async def reset_daily_loss(session: AsyncSession, bankroll_state: BankrollState):
-    """Reset daily loss counter if it's a new day."""
+    """Reset daily loss counter if it's a new UTC day."""
     today = date.today().isoformat()
     last_reset = bankroll_state.last_reset_date or ""
     if last_reset != today:
