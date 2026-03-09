@@ -78,16 +78,42 @@ async def trigger_scan():
 async def serve_dashboard():
     """Serve the dashboard HTML directly from Railway."""
     import os
-    # Look for dashboard HTML relative to this file
-    base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    html_path = os.path.join(base, "weather-arb-dashboard.html")
-    if not os.path.exists(html_path):
-        # Fallback: check same dir as main.py
-        html_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "weather-arb-dashboard.html")
-    if os.path.exists(html_path):
-        with open(html_path, "r") as f:
-            return HTMLResponse(content=f.read())
-    return HTMLResponse(content="<h1>Dashboard not found</h1><p>Place weather-arb-dashboard.html in the backend root.</p>", status_code=404)
+    this_file = os.path.abspath(__file__)  # backend/api/main.py
+    api_dir = os.path.dirname(this_file)   # backend/api/
+    backend_dir = os.path.dirname(api_dir) # backend/
+    repo_dir = os.path.dirname(backend_dir) # repo root
+
+    # Search in likely locations
+    candidates = [
+        os.path.join(backend_dir, "weather-arb-dashboard.html"),
+        os.path.join(repo_dir, "weather-arb-dashboard.html"),
+        os.path.join(api_dir, "weather-arb-dashboard.html"),
+    ]
+    for html_path in candidates:
+        if os.path.exists(html_path):
+            with open(html_path, "r") as f:
+                return HTMLResponse(content=f.read())
+
+    # Debug: show what we searched
+    searched = ", ".join(candidates)
+    return HTMLResponse(
+        content=f"<h1>Dashboard not found</h1><p>Searched: {searched}</p>",
+        status_code=404
+    )
+
+
+@app.post("/api/admin/reset-daily-loss")
+async def reset_daily_loss_endpoint():
+    """Force-reset the daily loss counter. Use when counter is stuck."""
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            from core.signals import get_bankroll
+            from datetime import date
+            bankroll_state = await get_bankroll(session)
+            old_val = bankroll_state.daily_loss_today
+            bankroll_state.daily_loss_today = 0.0
+            bankroll_state.last_reset_date = date.today().isoformat()
+    return {"status": "reset", "previous_daily_loss": old_val, "now": 0.0}
 
 
 @app.get("/health")
