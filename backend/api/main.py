@@ -116,6 +116,100 @@ async def reset_daily_loss_endpoint():
     return {"status": "reset", "previous_daily_loss": old_val, "now": 0.0}
 
 
+@app.post("/api/admin/purge-stale-trades")
+async def purge_stale_trades():
+    """
+    Delete open trades that were entered against expired/stale Polymarket markets.
+    A trade is stale if its market_condition references a date before today.
+    Also refunds the position size back to bankroll.
+    """
+    from datetime import datetime, timezone, timedelta
+    import re
+
+    today = datetime.now(timezone.utc).date()
+
+    def extract_date_from_condition(condition: str):
+        """Parse date from market_condition or polymarket title."""
+        if not condition:
+            return None
+        m = re.search(
+            r'\b(january|february|march|april|may|june|july|august|'
+            r'september|october|november|december)\s+(\d{1,2})\b',
+            condition.lower()
+        )
+        if m:
+            try:
+                year = datetime.now(timezone.utc).year
+                dt = datetime.strptime(f"{m.group(1)} {m.group(2)} {year}", "%B %d %Y")
+                return dt.date()
+            except ValueError:
+                pass
+        return None
+
+    purged = []
+    kept = []
+
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            bankroll_state = await get_bankroll(session)
+
+            result = await session.execute(
+                select(Trade).where(Trade.status == "OPEN")
+            )
+            open_trades = result.scalars().all()
+
+            for trade in open_trades:
+                # Check opened_at date — trades opened before today are candidates
+                trade_open_date = trade.opened_at.date() if trade.opened_at else None
+
+                # Also check if the market_condition has an explicit old date
+                condition_date = extract_date_from_condition(trade.market_condition or "")
+
+                is_stale = False
+                reason = ""
+
+                if condition_date and condition_date < today:
+                    is_stale = True
+                    reason = f"market_condition date {condition_date} < today {today}"
+                elif trade_open_date and trade_open_date < today:
+                    # Opened before today — check if it has a valid today/tomorrow market
+                    # For safety, flag trades opened more than 1 day ago
+                    if trade_open_date < today - timedelta(days=1):
+                        is_stale = True
+                        reason = f"opened {trade_open_date}, more than 1 day old"
+
+                if is_stale:
+                    # Refund position size to bankroll
+                    bankroll_state.balance = round(
+                        bankroll_state.balance + trade.position_size_usd, 2
+                    )
+                    purged.append({
+                        "id": trade.id,
+                        "city": trade.city,
+                        "threshold": trade.threshold_f,
+                        "direction": trade.direction,
+                        "size": trade.position_size_usd,
+                        "reason": reason,
+                    })
+                    await session.delete(trade)
+                    logger.info(
+                        f"[PURGE] Deleted stale trade: {trade.city} "
+                        f">={trade.threshold_f} {trade.direction} | "
+                        f"${trade.position_size_usd} refunded | {reason}"
+                    )
+                else:
+                    kept.append(f"{trade.city} >={trade.threshold_f} {trade.direction}")
+
+    return {
+        "status": "done",
+        "purged_count": len(purged),
+        "kept_count": len(kept),
+        "bankroll_after": bankroll_state.balance,
+        "purged_trades": purged,
+        "kept_trades": kept,
+    }
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "dry_run": DRY_RUN, "timestamp": datetime.utcnow().isoformat()}
