@@ -91,9 +91,9 @@ async def run_scan() -> dict:
                     log(f"Keeping {trade.city} ≥{trade.threshold_f} — opened today, not yet eligible")
                     continue
 
-                # Rule 2: For yesterday's trades, wait until after settlement hour
-                if trade_date == today and now_utc.hour < settlement_hour_utc:
-                    log(f"Keeping {trade.city} ≥{trade.threshold_f} — before settlement window")
+                # Rule 2: For prior-day trades, wait until after settlement hour UTC
+                if trade_date < today and now_utc.hour < settlement_hour_utc:
+                    log(f"Keeping {trade.city} ≥{trade.threshold_f} — before settlement window (need 8pm UTC)")
                     continue
 
                 city_cfg = city_by_name.get(trade.city)
