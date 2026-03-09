@@ -102,7 +102,24 @@ async def serve_dashboard():
     )
 
 
-@app.post("/api/admin/reset-daily-loss")
+@app.post("/api/admin/reset-bankroll")
+async def reset_bankroll_endpoint():
+    """Hard reset bankroll to STARTING_BANKROLL. Use when balance is corrupted."""
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            bankroll_state = await get_bankroll(session)
+            old_balance = bankroll_state.balance
+            bankroll_state.balance = STARTING_BANKROLL
+            bankroll_state.daily_loss_today = 0.0
+            bankroll_state.last_reset_date = date.today().isoformat()
+    return {
+        "status": "reset",
+        "previous_balance": old_balance,
+        "new_balance": STARTING_BANKROLL,
+    }
+
+
+
 async def reset_daily_loss_endpoint():
     """Force-reset the daily loss counter. Use when counter is stuck."""
     async with AsyncSessionLocal() as session:
