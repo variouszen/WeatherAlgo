@@ -848,12 +848,12 @@
     }
     el.innerHTML = positions.map(t => `
       <div class="trade-item">
-        <span class="trade-side ${t.side.toLowerCase()}">${t.side}</span>
+        <span class="trade-side ${t.direction.toLowerCase()}">${t.direction}</span>
         <div class="trade-info">
-          <div class="trade-city">${t.city} — ${t.threshold}°F</div>
-          <div class="trade-detail">Entry: ${t.entry_price} · Edge: ${(t.edge*100).toFixed(1)}% · Day ${t.forecast_day}</div>
+          <div class="trade-city">${t.city} — ${t.threshold_f}° ${t.market_condition && t.market_condition.includes('°C') ? 'C' : 'F'}</div>
+          <div class="trade-detail">Entry: ${t.entry_price} · Edge: ${t.edge_pct.toFixed(1)}% · NOAA: ${t.noaa_forecast_high}°</div>
         </div>
-        <span class="trade-stake">${fmt$(t.stake_usd)}</span>
+        <span class="trade-stake">${fmt$(t.position_size_usd)}</span>
         <span class="trade-pnl open">OPEN</span>
       </div>
     `).join('');
@@ -866,17 +866,17 @@
       return;
     }
     el.innerHTML = [...trades].reverse().map(t => {
-      const pnl = t.pnl_usd;
+      const pnl = t.net_pnl;
       const pnlClass = pnl === null ? 'open' : pnl >= 0 ? 'pos' : 'neg';
       const pnlTxt = pnl === null ? 'OPEN' : (pnl >= 0 ? '+' : '') + fmt$(pnl);
       return `
         <div class="trade-item">
-          <span class="trade-side ${t.side.toLowerCase()}">${t.side}</span>
+          <span class="trade-side ${t.direction.toLowerCase()}">${t.direction}</span>
           <div class="trade-info">
-            <div class="trade-city">${t.city} — ${t.threshold}°F</div>
-            <div class="trade-detail">${fmtDate(t.opened_at)} · Edge: ${(t.edge*100).toFixed(1)}%</div>
+            <div class="trade-city">${t.city} — ${t.threshold_f}°F</div>
+            <div class="trade-detail">${fmtDate(t.opened_at)} · Edge: ${t.edge_pct.toFixed(1)}%</div>
           </div>
-          <span class="trade-stake">${fmt$(t.stake_usd)}</span>
+          <span class="trade-stake">${fmt$(t.position_size_usd)}</span>
           <span class="trade-pnl ${pnlClass}">${pnlTxt}</span>
         </div>
       `;
