@@ -177,6 +177,7 @@ async def run_scan() -> dict:
 
                     edge = abs(noaa_prob - yes_price)
 
+                    unit = f.get("unit", "F")
                     if should_trade:
                         scan_result["signals_found"] += 1
                         signal_info = {
@@ -194,12 +195,12 @@ async def run_scan() -> dict:
                         if city not in best_per_city or edge > best_per_city[city]["edge"]:
                             best_per_city[city] = signal_info
                         log(
-                            f"SIGNAL {city} ≥{threshold}°F {direction} | "
+                            f"SIGNAL {city} ≥{threshold}°{unit} {direction} | "
                             f"NOAA={noaa_prob:.1%} Mkt={yes_price:.2f} Edge={edge:.1%} | ${sizing.get('size_usd', 0)}"
                         )
                     else:
                         if edge >= 0.05:  # Only log near-misses
-                            log(f"SKIP {city} ≥{threshold}°F | {reason} | Edge={edge:.1%}")
+                            log(f"SKIP {city} ≥{threshold}°{unit} | {reason} | Edge={edge:.1%}")
 
             # ── Step 7: Open paper trades ─────────────────────────────────────
             for city, sig in best_per_city.items():
@@ -220,7 +221,7 @@ async def run_scan() -> dict:
                     open_yes_count += 1
                 scan_result["trades_opened"] += 1
                 log(
-                    f"TRADE OPENED: {city} ≥{sig['threshold']}°F {sig['direction']} | "
+                    f"TRADE OPENED: {city} ≥{sig['threshold']}°{sig['forecast'].get('unit','F')} {sig['direction']} | "
                     f"${sig['sizing']['size_usd']} | Bankroll→${bankroll_state.balance:.2f}"
                 )
 

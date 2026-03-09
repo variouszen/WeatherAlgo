@@ -3,6 +3,7 @@ import logging
 import asyncio
 from datetime import datetime, date
 from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select, func, desc
 import sys, os
@@ -72,6 +73,22 @@ async def trigger_scan():
 
 
 # ── API Endpoints ──────────────────────────────────────────────────────────────
+
+@app.get("/", response_class=HTMLResponse)
+async def serve_dashboard():
+    """Serve the dashboard HTML directly from Railway."""
+    import os
+    # Look for dashboard HTML relative to this file
+    base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    html_path = os.path.join(base, "weather-arb-dashboard.html")
+    if not os.path.exists(html_path):
+        # Fallback: check same dir as main.py
+        html_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "weather-arb-dashboard.html")
+    if os.path.exists(html_path):
+        with open(html_path, "r") as f:
+            return HTMLResponse(content=f.read())
+    return HTMLResponse(content="<h1>Dashboard not found</h1><p>Place weather-arb-dashboard.html in the backend root.</p>", status_code=404)
+
 
 @app.get("/health")
 async def health():

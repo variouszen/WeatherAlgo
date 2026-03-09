@@ -148,13 +148,14 @@ async def open_paper_trade(
     entry_price = market_data["yes_price"] if direction == "YES" else (1 - market_data["yes_price"])
     noaa_prob = noaa_data["bucket_probs"][threshold]
     edge = abs(noaa_prob - market_data["yes_price"])
+    unit = noaa_data.get("unit", "F")
 
     trade = Trade(
         city=city,
         station_id=station_id,
         threshold_f=threshold,
         direction=direction,
-        market_condition=f"High ≥ {threshold}°F",
+        market_condition=f"High ≥ {threshold}°{unit}",
         polymarket_market_id=market_data.get("market_id"),
         polymarket_token_id=market_data.get("token_id"),
         market_yes_price=market_data["yes_price"],
@@ -182,7 +183,7 @@ async def open_paper_trade(
 
     await session.flush()
     logger.info(
-        f"[TRADE] OPEN {city} ≥{threshold}°F {direction} | "
+        f"[TRADE] OPEN {city} ≥{threshold}°{unit} {direction} | "
         f"Entry={entry_price:.3f} | Size=${size} | Edge={edge:.1%} | Bankroll→${bankroll_state.balance:.2f}"
     )
     return trade
@@ -235,10 +236,12 @@ async def settle_trade(
 
     await session.flush()
 
+    unit = "C" if trade.threshold_f != int(trade.threshold_f * 9/5 + 32) and trade.threshold_f < 50 else "F"
+
     logger.info(
-        f"[SETTLE] {trade.city} ≥{trade.threshold_f}°F {trade.direction} | "
-        f"Actual={actual_high_f}°F | {status} | Net P&L=${net_pnl:+.2f} | "
-        f"Forecast error={forecast_error:+.1f}°F | Bankroll→${bankroll_state.balance:.2f}"
+        f"[SETTLE] {trade.city} ≥{trade.threshold_f}°{unit} {trade.direction} | "
+        f"Actual={actual_high_f}°{unit} | {status} | Net P&L=${net_pnl:+.2f} | "
+        f"Forecast error={forecast_error:+.1f}°{unit} | Bankroll→${bankroll_state.balance:.2f}"
     )
 
     return {

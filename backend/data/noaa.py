@@ -136,34 +136,42 @@ def compute_confidence(sigma: float) -> float:
 async def fetch_openmeteo_forecast(lat: float, lon: float, day_offset: int, client: httpx.AsyncClient) -> Optional[dict]:
     """
     Fetch daily high temperature from Open-Meteo for international cities.
-    Returns temp in °C.
+    Returns temp in °C. Retries up to 3 times with backoff on 429/504.
     """
-    try:
-        r = await client.get(
-            f"{OPEN_METEO_BASE}/forecast",
-            params={
-                "latitude": lat,
-                "longitude": lon,
-                "daily": "temperature_2m_max,temperature_2m_min",
-                "timezone": "auto",
-                "forecast_days": 3,
-            },
-            timeout=12.0,
-        )
-        r.raise_for_status()
-        data = r.json()
-        daily = data.get("daily", {})
-        highs = daily.get("temperature_2m_max", [])
-        lows  = daily.get("temperature_2m_min", [])
-        if len(highs) > day_offset:
-            return {
-                "high_c": float(highs[day_offset]),
-                "low_c":  float(lows[day_offset]) if len(lows) > day_offset else None,
-            }
-        return None
-    except Exception as e:
-        logger.warning(f"[OpenMeteo] fetch failed ({lat},{lon}): {e}")
-        return None
+    for attempt in range(3):
+        try:
+            r = await client.get(
+                f"{OPEN_METEO_BASE}/forecast",
+                params={
+                    "latitude": lat,
+                    "longitude": lon,
+                    "daily": "temperature_2m_max,temperature_2m_min",
+                    "timezone": "auto",
+                    "forecast_days": 3,
+                },
+                timeout=15.0,
+            )
+            if r.status_code in (429, 504):
+                wait = (attempt + 1) * 5
+                logger.warning(f"[OpenMeteo] {r.status_code} for ({lat},{lon}), retrying in {wait}s...")
+                await asyncio.sleep(wait)
+                continue
+            r.raise_for_status()
+            data = r.json()
+            daily = data.get("daily", {})
+            highs = daily.get("temperature_2m_max", [])
+            lows  = daily.get("temperature_2m_min", [])
+            if len(highs) > day_offset:
+                return {
+                    "high_c": float(highs[day_offset]),
+                    "low_c":  float(lows[day_offset]) if len(lows) > day_offset else None,
+                }
+            return None
+        except Exception as e:
+            logger.warning(f"[OpenMeteo] fetch failed ({lat},{lon}): {e}")
+            if attempt < 2:
+                await asyncio.sleep((attempt + 1) * 5)
+    return None
 
 
 async def get_openmeteo_observation(lat: float, lon: float, client: httpx.AsyncClient) -> Optional[float]:
