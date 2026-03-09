@@ -144,8 +144,8 @@ def is_valid_market_date(title: str) -> bool:
         logger.debug(f"[POLY] Could not parse date from: '{title[:60]}'")
         return False
     today = datetime.now(timezone.utc).date()
-    tomorrow = today + timedelta(days=1)
-    valid = market_date in (today, tomorrow)
+    max_date = today + timedelta(days=5)
+    valid = today <= market_date <= max_date
     if not valid:
         logger.debug(f"[POLY] Skipping stale/future market: '{title[:60]}' (date={market_date})")
     return valid
