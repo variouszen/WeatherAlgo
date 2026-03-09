@@ -8,8 +8,7 @@ import sys, os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import BOT_CONFIG, CITIES, TEMP_THRESHOLDS_F, TEMP_THRESHOLDS_C, TEMP_THRESHOLDS
-from data.noaa import fetch_all_cities, get_latest_observation
-import httpx
+from data.noaa import fetch_all_cities, get_nws_daily_high, get_openmeteo_daily_high
 from data.polymarket import build_market_map
 from core.signals import (
     get_bankroll, get_open_positions,
@@ -80,34 +79,52 @@ async def run_scan() -> dict:
             open_positions = await get_open_positions(session)
             log(f"Open positions: {len(open_positions)}")
 
+            now_utc = datetime.utcnow()
+            today = now_utc.date()
+            settlement_hour_utc = 20  # Only settle after 8pm UTC (~3-4pm US Eastern)
+
             for trade in open_positions:
+                trade_date = trade.opened_at.date()
+
+                # Rule 1: Never settle same-day trades
+                if trade_date >= today:
+                    log(f"Keeping {trade.city} ≥{trade.threshold_f} — opened today, not yet eligible")
+                    continue
+
+                # Rule 2: For yesterday's trades, wait until after settlement hour
+                if trade_date == today and now_utc.hour < settlement_hour_utc:
+                    log(f"Keeping {trade.city} ≥{trade.threshold_f} — before settlement window")
+                    continue
+
                 city_cfg = city_by_name.get(trade.city)
                 if not city_cfg:
+                    log(f"No city config for {trade.city} — skipping", "WARN")
                     continue
 
-                # Get current observation for this city's NWS station
-                async with httpx.AsyncClient() as client:
-                    from data.noaa import get_latest_observation
-                    actual_temp = await get_latest_observation(city_cfg["station"], client)
+                is_celsius = city_cfg.get("celsius", False)
+                unit = "C" if is_celsius else "F"
 
-                if actual_temp is None:
-                    log(f"No observation for {trade.city} ({city_cfg['station']}) — keeping open")
-                    continue
-
-                # Only settle if it's end of market day (past 8pm local) or temp is definitive
-                # Simple heuristic: if actual_temp is well above or below threshold, settle now
-                # In production you'd check the market's end_date
-                gap = abs(actual_temp - trade.threshold_f)
-                if gap > trade.noaa_sigma * 2:
-                    # Temp is more than 2σ from threshold — result is clear
-                    result = await settle_trade(session, trade, actual_temp, bankroll_state)
-                    scan_result["trades_settled"] += 1
-                    log(
-                        f"SETTLED {trade.city} ≥{trade.threshold_f}°F | "
-                        f"Actual={actual_temp}°F | {result['status']} | Net=${result['net_pnl']:+.2f}"
+                # Fetch final daily high for trade date
+                if is_celsius:
+                    actual_high = await get_openmeteo_daily_high(
+                        city_cfg["lat"], city_cfg["lon"], trade_date
                     )
                 else:
-                    log(f"Keeping {trade.city} ≥{trade.threshold_f}°F open — too close to call (actual={actual_temp}°F)")
+                    actual_high = await get_nws_daily_high(
+                        city_cfg["station"], trade_date
+                    )
+
+                if actual_high is None:
+                    log(f"No daily high data for {trade.city} on {trade_date} — keeping open", "WARN")
+                    continue
+
+                result = await settle_trade(session, trade, actual_high, bankroll_state)
+                scan_result["trades_settled"] += 1
+                log(
+                    f"SETTLED {trade.city} ≥{trade.threshold_f}°{unit} | "
+                    f"Date={trade_date} | Actual={actual_high}°{unit} | "
+                    f"{result['status']} | Net=${result['net_pnl']:+.2f}"
+                )
 
             # ── Step 4: Log calibration data ───────────────────────────────────
             for f in forecasts:

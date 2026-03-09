@@ -280,6 +280,82 @@ async def fetch_city_forecast(city: dict, day_offset: int, client: httpx.AsyncCl
         }
 
 
+async def get_nws_daily_high(station_id: str, target_date) -> Optional[float]:
+    """
+    Fetch the confirmed daily high (°F) for a US NWS station on a given date.
+    Uses the observations history endpoint — takes max temp across all readings.
+    target_date: date object or ISO string (YYYY-MM-DD)
+    """
+    date_str = str(target_date)
+    start = f"{date_str}T00:00:00Z"
+    end   = f"{date_str}T23:59:59Z"
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.get(
+                f"{NOAA_BASE}/stations/{station_id}/observations",
+                params={"start": start, "end": end, "limit": 500},
+                headers=NOAA_HEADERS,
+                timeout=20.0,
+            )
+            r.raise_for_status()
+            features = r.json().get("features", [])
+            temps_f = []
+            for feat in features:
+                temp_c = feat.get("properties", {}).get("temperature", {}).get("value")
+                if temp_c is not None:
+                    temps_f.append(round(temp_c * 9 / 5 + 32, 1))
+            if temps_f:
+                daily_high = max(temps_f)
+                logger.info(f"[NWS Daily] {station_id} on {date_str}: high={daily_high}°F ({len(temps_f)} obs)")
+                return daily_high
+            logger.warning(f"[NWS Daily] {station_id} on {date_str}: no observations found")
+            return None
+    except Exception as e:
+        logger.warning(f"[NWS Daily] {station_id} on {date_str} failed: {e}")
+        return None
+
+
+async def get_openmeteo_daily_high(lat: float, lon: float, target_date) -> Optional[float]:
+    """
+    Fetch confirmed daily high (°C) from Open-Meteo for a past date.
+    Uses the historical API endpoint for completed days.
+    target_date: date object or ISO string (YYYY-MM-DD)
+    """
+    date_str = str(target_date)
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient() as client:
+                r = await client.get(
+                    f"{OPEN_METEO_BASE}/archive",  # historical endpoint
+                    params={
+                        "latitude": lat,
+                        "longitude": lon,
+                        "start_date": date_str,
+                        "end_date": date_str,
+                        "daily": "temperature_2m_max",
+                        "timezone": "auto",
+                    },
+                    timeout=15.0,
+                )
+                if r.status_code in (429, 504):
+                    await asyncio.sleep((attempt + 1) * 5)
+                    continue
+                r.raise_for_status()
+                data = r.json()
+                highs = data.get("daily", {}).get("temperature_2m_max", [])
+                if highs and highs[0] is not None:
+                    daily_high = float(highs[0])
+                    logger.info(f"[OpenMeteo Daily] ({lat},{lon}) on {date_str}: high={daily_high}°C")
+                    return daily_high
+                logger.warning(f"[OpenMeteo Daily] ({lat},{lon}) on {date_str}: no data")
+                return None
+        except Exception as e:
+            logger.warning(f"[OpenMeteo Daily] ({lat},{lon}) on {date_str} failed: {e}")
+            if attempt < 2:
+                await asyncio.sleep((attempt + 1) * 5)
+    return None
+
+
 async def fetch_all_cities(day_offset: int = 0) -> list[dict]:
     """Fetch forecasts for all configured cities concurrently."""
     results = []
