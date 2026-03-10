@@ -251,7 +251,7 @@ async def run_scan() -> dict:
                             best_per_city[city] = signal_info
                         log(
                             f"SIGNAL {city} >={threshold}{unit} {direction} | "
-                            f"NOAA={noaa_raw:.1f} OM={om_forecast:.1f if om_forecast else 'N/A'} | "
+                            f"NOAA={noaa_raw:.1f} OM={f'{om_forecast:.1f}' if om_forecast is not None else 'N/A'} | "
                             f"NOAA_prob={noaa_prob:.1%} Mkt={yes_price:.2f} Edge={edge:.1%} | ${sizing.get('size_usd', 0)}"
                         )
                     else:
@@ -278,7 +278,7 @@ async def run_scan() -> dict:
                 scan_result["trades_opened"] += 1
                 log(
                     f"TRADE OPENED: {city} >={sig['threshold']}{sig['forecast'].get('unit','F')} {sig['direction']} | "
-                    f"NOAA={sig['noaa_raw']:.1f} OM={sig['om_raw']:.1f if sig['om_raw'] else 'N/A'} | "
+                    f"NOAA={sig['noaa_raw']:.1f} OM={f\"{sig['om_raw']:.1f}\" if sig['om_raw'] is not None else 'N/A'} | "
                     f"${sig['sizing']['size_usd']} | Bankroll->${bankroll_state.balance:.2f}"
                 )
 

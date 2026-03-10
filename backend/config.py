@@ -34,7 +34,7 @@ BOT_CONFIG = {
     "max_source_spread_c": 3.0,
     # Minimum buffer between consensus forecast and threshold
     # Prevents trading razor-edge cases like NOAA=66 on a 64°F threshold
-    "min_buffer_f": 4.0,
+    "min_buffer_f": 2.0,
     "min_buffer_c": 1.5,
     # Skip NO trades if crowd already prices YES this high — they know it's a lock
     # Today's lesson: NYC YES was 85¢, bot shorted it and lost. This kills that.
