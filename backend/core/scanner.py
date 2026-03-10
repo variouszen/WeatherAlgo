@@ -29,33 +29,32 @@ async def fetch_openmeteo_forecasts() -> dict[str, float]:
     Fetch today's forecast high from Open-Meteo for all cities.
     Returns dict of {city_name: forecast_high} in native unit (F or C).
     Used as second source for consensus filtering.
+
+    Serialized with 0.5s stagger between calls to avoid hammering the
+    Open-Meteo free tier rate limit (parallel bursts cause consistent 429s).
     """
-    import httpx
     results = {}
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        tasks = []
-        city_order = []
-        for city_cfg in CITIES:
-            tasks.append(
-                get_openmeteo_forecast_high(
-                    city_cfg["lat"],
-                    city_cfg["lon"],
-                    day_offset=0,
-                    celsius=city_cfg.get("celsius", False),
-                    city_timezone=city_cfg.get("timezone", "UTC"),
-                )
+    for i, city_cfg in enumerate(CITIES):
+        if i > 0:
+            await asyncio.sleep(0.5)
+        city_name = city_cfg["name"]
+        try:
+            forecast = await get_openmeteo_forecast_high(
+                city_cfg["lat"],
+                city_cfg["lon"],
+                day_offset=0,
+                celsius=city_cfg.get("celsius", False),
+                city_timezone=city_cfg.get("timezone", "UTC"),
             )
-            city_order.append(city_cfg["name"])
-
-        forecasts = await asyncio.gather(*tasks, return_exceptions=True)
-
-        for city_name, forecast in zip(city_order, forecasts):
-            if isinstance(forecast, Exception) or forecast is None:
-                logger.warning(f"[OM] Failed to get forecast for {city_name}: {forecast}")
+            if forecast is None:
+                logger.warning(f"[OM] Failed to get forecast for {city_name}: None")
                 results[city_name] = None
             else:
                 results[city_name] = forecast
                 logger.info(f"[OM] {city_name}: {forecast:.1f}")
+        except Exception as e:
+            logger.warning(f"[OM] Failed to get forecast for {city_name}: {e}")
+            results[city_name] = None
 
     return results
 

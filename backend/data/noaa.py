@@ -369,11 +369,11 @@ async def get_openmeteo_forecast_high(
     Uses the city's local date so Seoul/London don't get day mismatches at UTC midnight.
     Used as the second source for multi-source consensus filtering.
     """
-    from datetime import timedelta, date
+    from datetime import timedelta, date, datetime as _datetime
     try:
         import pytz
         local_tz = pytz.timezone(city_timezone)
-        local_now = datetime.now(local_tz)
+        local_now = _datetime.now(local_tz)
         target_date = (local_now.date() + timedelta(days=day_offset)).isoformat()
     except Exception:
         target_date = (date.today() + timedelta(days=day_offset)).isoformat()

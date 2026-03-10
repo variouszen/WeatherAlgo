@@ -852,6 +852,7 @@
         <div class="trade-info">
           <div class="trade-city">${t.city} — ${t.threshold_f}° ${t.market_condition && t.market_condition.includes('°C') ? 'C' : 'F'}</div>
           <div class="trade-detail">Entry: ${t.entry_price} · Edge: ${t.edge_pct.toFixed(1)}% · NOAA: ${t.noaa_forecast_high}°</div>
+          <div class="trade-detail" style="opacity:0.5; font-size:0.75em; margin-top:2px;">Opened: ${fmtDate(t.opened_at)}</div>
         </div>
         <span class="trade-stake">${fmt$(t.position_size_usd)}</span>
         <span class="trade-pnl open">OPEN</span>
