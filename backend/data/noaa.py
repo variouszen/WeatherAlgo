@@ -356,6 +356,69 @@ async def get_openmeteo_daily_high(lat: float, lon: float, target_date) -> Optio
     return None
 
 
+async def get_openmeteo_forecast_high(
+    lat: float,
+    lon: float,
+    day_offset: int = 0,
+    celsius: bool = False,
+) -> Optional[float]:
+    """
+    Fetch today's (or day_offset) forecast high from Open-Meteo forecast API.
+    Returns °F for US cities (celsius=False) or °C for international (celsius=True).
+    Used as the second source for multi-source consensus filtering.
+    """
+    from datetime import date, timedelta
+    target_date = (date.today() + timedelta(days=day_offset)).isoformat()
+
+    temperature_unit = "celsius"  # Open-Meteo always returns °C; we convert if needed
+
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient() as client:
+                r = await client.get(
+                    f"{OPEN_METEO_BASE}/forecast",
+                    params={
+                        "latitude": lat,
+                        "longitude": lon,
+                        "daily": "temperature_2m_max",
+                        "temperature_unit": temperature_unit,
+                        "timezone": "auto",
+                        "forecast_days": max(2, day_offset + 1),
+                    },
+                    timeout=15.0,
+                )
+                if r.status_code in (429, 504):
+                    await asyncio.sleep((attempt + 1) * 3)
+                    continue
+                r.raise_for_status()
+                data = r.json()
+                dates = data.get("daily", {}).get("time", [])
+                highs = data.get("daily", {}).get("temperature_2m_max", [])
+
+                for d, h in zip(dates, highs):
+                    if d == target_date and h is not None:
+                        high_c = float(h)
+                        if celsius:
+                            result = round(high_c, 1)
+                        else:
+                            result = round(high_c * 9 / 5 + 32, 1)
+                        logger.info(
+                            f"[OM Forecast] ({lat},{lon}) {target_date}: "
+                            f"{high_c:.1f}°C → {result:.1f}{'°C' if celsius else '°F'}"
+                        )
+                        return result
+
+                logger.warning(f"[OM Forecast] ({lat},{lon}) {target_date}: date not found in response")
+                return None
+
+        except Exception as e:
+            logger.warning(f"[OM Forecast] ({lat},{lon}) attempt {attempt+1} failed: {e}")
+            if attempt < 2:
+                await asyncio.sleep((attempt + 1) * 3)
+
+    return None
+
+
 async def fetch_all_cities(day_offset: int = 0) -> list[dict]:
     """Fetch forecasts for all configured cities concurrently."""
     results = []

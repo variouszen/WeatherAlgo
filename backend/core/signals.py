@@ -23,27 +23,15 @@ def compute_kelly_size(
     bankroll: float,
     correlated_yes_count: int = 0,
 ) -> dict:
-    """
-    Quarter-Kelly with correlation discount and position caps.
-    Returns breakdown dict for transparency.
-    """
     cfg = BOT_CONFIG
 
-    # Raw Kelly fraction: edge * confidence / (1 - entry_price)
     kelly_raw = (edge * confidence) / max(0.001, 1 - entry_price)
-
-    # Quarter-Kelly
     kelly_q = kelly_raw * cfg["kelly_fraction"]
-
-    # Correlation discount: if ≥ max_correlated_yes YES positions open, halve size
-    correlation_factor = 0.5 if correlated_yes_count >= cfg.get("max_correlated_yes", 3) else 1.0
-
-    # Cap at max_position_pct of bankroll
+    correlation_factor = 0.5 if correlated_yes_count >= cfg["max_correlated_yes"] else 1.0
     kelly_capped = min(kelly_q * correlation_factor, cfg["max_position_pct"])
 
-    # Dollar size with min floor and hard cap
     size_raw = bankroll * kelly_capped
-    size = max(cfg.get("min_position_usd", 10), round(size_raw, 2))
+    size = max(cfg["min_position_usd"], round(size_raw, 2))
     size = min(size, bankroll * cfg["max_position_pct"])
 
     return {
@@ -68,47 +56,105 @@ def evaluate_signal(
     bankroll: float,
     open_city_positions: list[str],
     open_yes_positions: int,
-    min_edge_override: float = None,  # scanner can pass elevated min_edge for above-forecast YES
+    # Multi-source consensus inputs (NEW)
+    noaa_forecast: float = None,        # NOAA raw forecast high
+    openmeteo_forecast: float = None,   # Open-Meteo raw forecast high
+    is_celsius: bool = False,
 ) -> tuple[bool, str, dict]:
     """
     Run all filters. Returns (should_trade, reason, sizing_info).
-    min_edge_override allows scanner to require higher edge for suspicious signals.
+
+    v2 changes:
+    - Requires both NOAA and Open-Meteo to agree on direction
+    - Requires minimum buffer between consensus forecast and threshold
+    - Skips NO trades when crowd is already 80%+ on YES
+    - Skips trades when source spread is too wide (high uncertainty)
     """
     cfg = BOT_CONFIG
 
     entry_price = market_yes_price if direction == "YES" else (1 - market_yes_price)
     edge = abs(noaa_prob - market_yes_price)
 
-    # Effective minimum edge (can be raised by scanner for above-forecast YES)
-    effective_min_edge = min_edge_override if min_edge_override is not None else cfg["min_edge"]
+    # ── Filter 1: Minimum edge ────────────────────────────────────────────────
+    if edge < cfg["min_edge"]:
+        return False, f"Edge {edge:.1%} < min {cfg['min_edge']:.1%}", {}
 
-    # Filter 1: Minimum edge (potentially elevated)
-    if edge < effective_min_edge:
-        return False, f"Edge {edge:.1%} < min {effective_min_edge:.1%}", {}
-
-    # Filter 2: Confidence
+    # ── Filter 2: Confidence ──────────────────────────────────────────────────
     if confidence < cfg["min_confidence"]:
         return False, f"Confidence {confidence:.1%} < min {cfg['min_confidence']:.1%}", {}
 
-    # Filter 3: Volume
+    # ── Filter 3: Volume ──────────────────────────────────────────────────────
     if volume < cfg["min_market_volume"]:
         return False, f"Volume ${volume:,.0f} < min ${cfg['min_market_volume']:,.0f}", {}
 
-    # Filter 4: Price bounds (avoid buying extreme prices)
-    if direction == "YES" and market_yes_price > cfg.get("max_yes_price", 0.90):
-        return False, f"YES price {market_yes_price:.2f} > max {cfg.get('max_yes_price', 0.90):.2f}", {}
-    if direction == "NO" and market_yes_price < cfg.get("min_no_price", 0.10):
-        return False, f"NO side: YES price {market_yes_price:.2f} < floor {cfg.get('min_no_price', 0.10):.2f}", {}
+    # ── Filter 4: Price bounds ────────────────────────────────────────────────
+    if direction == "YES" and market_yes_price > cfg["max_yes_price"]:
+        return False, f"YES price {market_yes_price:.2f} > max {cfg['max_yes_price']:.2f}", {}
+    if direction == "NO" and market_yes_price < cfg["min_no_price"]:
+        return False, f"NO side: YES price {market_yes_price:.2f} < floor {cfg['min_no_price']:.2f}", {}
 
-    # Filter 5: One position per city
+    # ── Filter 5: Don't fade a near-certain crowd (NEW) ───────────────────────
+    # If crowd is 80%+ on YES, don't take the NO regardless of NOAA sigma edge.
+    # The crowd has already priced in forecast variance. Today's NYC lesson.
+    if direction == "NO" and market_yes_price > cfg["max_yes_price_for_no"]:
+        return False, (
+            f"Crowd conviction too high: YES at {market_yes_price:.2f} > "
+            f"{cfg['max_yes_price_for_no']:.2f} — skipping NO"
+        ), {}
+
+    # ── Filter 6: One position per city ──────────────────────────────────────
     if city in open_city_positions:
         return False, f"Already have open position in {city}", {}
 
-    # Filter 6: Bankroll floor
+    # ── Filter 7: Bankroll floor ──────────────────────────────────────────────
     if bankroll < cfg["bankroll_floor"]:
         return False, f"Bankroll ${bankroll:.2f} below floor ${cfg['bankroll_floor']:.2f}", {}
 
-    # All passed — compute sizing
+    # ── Filter 8: Multi-source consensus (NEW) ────────────────────────────────
+    if cfg.get("require_source_consensus") and noaa_forecast is not None and openmeteo_forecast is not None:
+
+        max_spread = cfg["max_source_spread_c"] if is_celsius else cfg["max_source_spread_f"]
+        min_buffer = cfg["min_buffer_c"] if is_celsius else cfg["min_buffer_f"]
+
+        spread = abs(noaa_forecast - openmeteo_forecast)
+
+        # 8a: Source spread check — if sources disagree too much, skip
+        if spread > max_spread:
+            return False, (
+                f"Source spread {spread:.1f}° too wide (NOAA={noaa_forecast:.1f} "
+                f"OM={openmeteo_forecast:.1f} max={max_spread}°) — forecast uncertain"
+            ), {}
+
+        # 8b: Direction consensus — both sources must agree on which side of threshold
+        noaa_above = noaa_forecast >= threshold
+        om_above = openmeteo_forecast >= threshold
+
+        if noaa_above != om_above:
+            return False, (
+                f"Sources disagree on direction: NOAA={noaa_forecast:.1f} "
+                f"({'above' if noaa_above else 'below'}) OM={openmeteo_forecast:.1f} "
+                f"({'above' if om_above else 'below'}) threshold={threshold}"
+            ), {}
+
+        # 8c: Buffer check — consensus forecast must clear threshold by min_buffer
+        # Use the more conservative of the two forecasts for buffer calculation
+        if direction == "YES":
+            # For YES, use the lower forecast as the conservative estimate
+            conservative_forecast = min(noaa_forecast, openmeteo_forecast)
+            buffer = conservative_forecast - threshold
+        else:
+            # For NO, use the higher forecast as the conservative estimate
+            conservative_forecast = max(noaa_forecast, openmeteo_forecast)
+            buffer = threshold - conservative_forecast
+
+        if buffer < min_buffer:
+            unit = "°C" if is_celsius else "°F"
+            return False, (
+                f"Insufficient buffer: {buffer:.1f}{unit} < min {min_buffer}{unit} "
+                f"(conservative forecast={conservative_forecast:.1f}, threshold={threshold})"
+            ), {}
+
+    # ── All filters passed — compute sizing ───────────────────────────────────
     sizing = compute_kelly_size(edge, entry_price, confidence, bankroll, open_yes_positions)
 
     if sizing["size_usd"] > bankroll:
@@ -145,7 +191,6 @@ async def open_paper_trade(
     sizing: dict,
     bankroll_state: BankrollState,
 ) -> Trade:
-    """INSERT a new paper trade and deduct from bankroll."""
     size = sizing["size_usd"]
     entry_price = market_data["yes_price"] if direction == "YES" else (1 - market_data["yes_price"])
     noaa_prob = noaa_data["bucket_probs"][threshold]
@@ -180,8 +225,8 @@ async def open_paper_trade(
     session.add(trade)
 
     bankroll_state.balance = round(bankroll_state.balance - size, 2)
-
     await session.flush()
+
     logger.info(
         f"[TRADE] OPEN {city} >={threshold}{unit} {direction} | "
         f"Entry={entry_price:.3f} | Size=${size} | Edge={edge:.1%} | Bankroll->${bankroll_state.balance:.2f}"
@@ -194,16 +239,11 @@ async def settle_trade(
     trade: Trade,
     actual_high_f: float,
     bankroll_state: BankrollState,
-    city_cfg: dict = None,  # pass city config for correct unit detection
 ) -> dict:
-    """
-    Resolve a trade against actual observed temperature.
-    Apply Polymarket 2% fee on winnings. Update bankroll.
-    """
     cfg = BOT_CONFIG
     won = (
         (trade.direction == "YES" and actual_high_f >= trade.threshold_f) or
-        (trade.direction == "NO"  and actual_high_f <  trade.threshold_f)
+        (trade.direction == "NO"  and actual_high_f < trade.threshold_f)
     )
 
     if won:
@@ -236,22 +276,14 @@ async def settle_trade(
 
     await session.flush()
 
-    # Correct unit from city config — no more heuristic guessing
-    is_celsius = city_cfg.get("celsius", False) if city_cfg else False
-    unit = "C" if is_celsius else "F"
-
+    unit = "C" if trade.threshold_f < 50 and trade.threshold_f == int(trade.threshold_f) else "F"
     logger.info(
         f"[SETTLE] {trade.city} >={trade.threshold_f}{unit} {trade.direction} | "
         f"Actual={actual_high_f}{unit} | {status} | Net P&L=${net_pnl:+.2f} | "
         f"Forecast error={forecast_error:+.1f}{unit} | Bankroll->${bankroll_state.balance:.2f}"
     )
 
-    return {
-        "status": status,
-        "net_pnl": net_pnl,
-        "fees": fees,
-        "forecast_error": forecast_error,
-    }
+    return {"status": status, "net_pnl": net_pnl, "fees": fees, "forecast_error": forecast_error}
 
 
 async def log_calibration(
@@ -261,28 +293,22 @@ async def log_calibration(
     forecast_high: float,
     actual_high: Optional[float],
     sigma: float,
-    trade_date: date = None,  # FIXED: use trade date, not today
 ):
-    """
-    Log daily forecast vs actual for calibration analysis.
-    Keyed to the trade date so calibration rows are accurate.
-    """
-    cal_date = trade_date.isoformat() if trade_date else date.today().isoformat()
-
+    today = date.today().isoformat()
     existing = await session.execute(
         select(CityCalibration).where(
             CityCalibration.city == city,
-            CityCalibration.date == cal_date,
+            CityCalibration.date == today,
         )
     )
     if existing.scalar_one_or_none():
-        return  # Already logged for this date
+        return
 
-    error = round(actual_high - forecast_high, 2) if actual_high is not None else None
+    error = round(actual_high - forecast_high, 2) if actual_high else None
     cal = CityCalibration(
         city=city,
         station_id=station_id,
-        date=cal_date,
+        date=today,
         forecast_high_f=forecast_high,
         actual_high_f=actual_high,
         forecast_error_f=error,
@@ -292,7 +318,6 @@ async def log_calibration(
 
 
 async def reset_daily_loss(session: AsyncSession, bankroll_state: BankrollState):
-    """Reset daily loss counter if it's a new UTC day."""
     today = date.today().isoformat()
     last_reset = bankroll_state.last_reset_date or ""
     if last_reset != today:
