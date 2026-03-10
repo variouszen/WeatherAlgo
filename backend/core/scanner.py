@@ -276,9 +276,10 @@ async def run_scan() -> dict:
                 if sig["direction"] == "YES":
                     open_yes_count += 1
                 scan_result["trades_opened"] += 1
+                om_str = f"{sig['om_raw']:.1f}" if sig['om_raw'] is not None else "N/A"
                 log(
                     f"TRADE OPENED: {city} >={sig['threshold']}{sig['forecast'].get('unit','F')} {sig['direction']} | "
-                    f"NOAA={sig['noaa_raw']:.1f} OM={f\"{sig['om_raw']:.1f}\" if sig['om_raw'] is not None else 'N/A'} | "
+                    f"NOAA={sig['noaa_raw']:.1f} OM={om_str} | "
                     f"${sig['sizing']['size_usd']} | Bankroll->${bankroll_state.balance:.2f}"
                 )
 
