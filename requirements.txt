@@ -11,3 +11,4 @@ apscheduler==3.10.4
 alembic==1.13.3
 pydantic==2.9.2
 aiohttp==3.10.10
+pytz==2024.1

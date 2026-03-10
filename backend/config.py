@@ -34,7 +34,7 @@ BOT_CONFIG = {
     "max_source_spread_c": 3.0,
     # Minimum buffer between consensus forecast and threshold
     # Prevents trading razor-edge cases like NOAA=66 on a 64°F threshold
-    "min_buffer_f": 2.0,
+    "min_buffer_f": 4.0,
     "min_buffer_c": 1.5,
     # Skip NO trades if crowd already prices YES this high — they know it's a lock
     # Today's lesson: NYC YES was 85¢, bot shorted it and lost. This kills that.
@@ -64,16 +64,16 @@ BOT_CONFIG = {
 
 # ── Cities ────────────────────────────────────────────────────────────────────
 CITIES = [
-    {"name": "New York",      "lat": 40.7128,  "lon": -74.0060,  "station": "KLGA", "emoji": "🗽",  "celsius": False},
-    {"name": "Chicago",       "lat": 41.8781,  "lon": -87.6298,  "station": "KORD", "emoji": "🌬️", "celsius": False},
-    {"name": "Seattle",       "lat": 47.6062,  "lon": -122.3321, "station": "KSEA", "emoji": "🌧️", "celsius": False},
-    {"name": "Atlanta",       "lat": 33.7490,  "lon": -84.3880,  "station": "KFTY", "emoji": "🍑",  "celsius": False},
-    {"name": "Dallas",        "lat": 32.7767,  "lon": -96.7970,  "station": "KDFW", "emoji": "🤠",  "celsius": False},
-    {"name": "Miami",         "lat": 25.7617,  "lon": -80.1918,  "station": "KMIA", "emoji": "🌴",  "celsius": False},
-    {"name": "Boston",        "lat": 42.3601,  "lon": -71.0589,  "station": "KBOS", "emoji": "🦞",  "celsius": False},
-    {"name": "Philadelphia",  "lat": 39.9526,  "lon": -75.1652,  "station": "KPHL", "emoji": "🔔",  "celsius": False},
-    {"name": "London",        "lat": 51.5033,  "lon": 0.0550,    "station": "EGLC", "emoji": "🎡",  "celsius": True},
-    {"name": "Seoul",         "lat": 37.5665,  "lon": 126.9780,  "station": "RKSS", "emoji": "🏮",  "celsius": True},
+    {"name": "New York",      "lat": 40.7128,  "lon": -74.0060,  "station": "KLGA", "emoji": "🗽",  "celsius": False, "timezone": "America/New_York"},
+    {"name": "Chicago",       "lat": 41.8781,  "lon": -87.6298,  "station": "KORD", "emoji": "🌬️", "celsius": False, "timezone": "America/Chicago"},
+    {"name": "Seattle",       "lat": 47.6062,  "lon": -122.3321, "station": "KSEA", "emoji": "🌧️", "celsius": False, "timezone": "America/Los_Angeles"},
+    {"name": "Atlanta",       "lat": 33.7490,  "lon": -84.3880,  "station": "KFTY", "emoji": "🍑",  "celsius": False, "timezone": "America/New_York"},
+    {"name": "Dallas",        "lat": 32.7767,  "lon": -96.7970,  "station": "KDFW", "emoji": "🤠",  "celsius": False, "timezone": "America/Chicago"},
+    {"name": "Miami",         "lat": 25.7617,  "lon": -80.1918,  "station": "KMIA", "emoji": "🌴",  "celsius": False, "timezone": "America/New_York"},
+    {"name": "Boston",        "lat": 42.3601,  "lon": -71.0589,  "station": "KBOS", "emoji": "🦞",  "celsius": False, "timezone": "America/New_York"},
+    {"name": "Philadelphia",  "lat": 39.9526,  "lon": -75.1652,  "station": "KPHL", "emoji": "🔔",  "celsius": False, "timezone": "America/New_York"},
+    {"name": "London",        "lat": 51.5033,  "lon": 0.0550,    "station": "EGLC", "emoji": "🎡",  "celsius": True, "timezone": "Europe/London"},
+    {"name": "Seoul",         "lat": 37.5665,  "lon": 126.9780,  "station": "RKSS", "emoji": "🏮",  "celsius": True, "timezone": "Asia/Seoul"},
 ]
 
 TEMP_THRESHOLDS_F = [40, 45, 50, 55, 60, 62, 64, 65, 66, 67, 68, 69, 70, 72, 75, 80, 85, 90]

@@ -361,14 +361,23 @@ async def get_openmeteo_forecast_high(
     lon: float,
     day_offset: int = 0,
     celsius: bool = False,
+    city_timezone: str = "UTC",
 ) -> Optional[float]:
     """
     Fetch today's (or day_offset) forecast high from Open-Meteo forecast API.
     Returns °F for US cities (celsius=False) or °C for international (celsius=True).
+    Uses the city's local date so Seoul/London don't get day mismatches at UTC midnight.
     Used as the second source for multi-source consensus filtering.
     """
-    from datetime import date, timedelta
-    target_date = (date.today() + timedelta(days=day_offset)).isoformat()
+    from datetime import timedelta, date
+    try:
+        import pytz
+        local_tz = pytz.timezone(city_timezone)
+        local_now = datetime.now(local_tz)
+        target_date = (local_now.date() + timedelta(days=day_offset)).isoformat()
+    except Exception:
+        target_date = (date.today() + timedelta(days=day_offset)).isoformat()
+        logger.warning(f"[OM Forecast] Could not resolve timezone '{city_timezone}', falling back to UTC date")
 
     temperature_unit = "celsius"  # Open-Meteo always returns °C; we convert if needed
 
