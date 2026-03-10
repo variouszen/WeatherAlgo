@@ -111,6 +111,10 @@ def evaluate_signal(
         return False, f"Bankroll ${bankroll:.2f} below floor ${cfg['bankroll_floor']:.2f}", {}
 
     # ── Filter 8: Multi-source consensus (NEW) ────────────────────────────────
+    if cfg.get("require_source_consensus") and noaa_forecast is not None:
+        # Missing OM data is a consensus failure — do not allow single-source trades
+        if openmeteo_forecast is None:
+            return False, "No Open-Meteo data — cannot confirm source consensus", {}
     if cfg.get("require_source_consensus") and noaa_forecast is not None and openmeteo_forecast is not None:
 
         max_spread = cfg["max_source_spread_c"] if is_celsius else cfg["max_source_spread_f"]
