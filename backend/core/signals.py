@@ -173,11 +173,26 @@ def evaluate_signal(
     all_forecasts = [f for f in [primary_forecast, gfs_forecast, ecmwf_forecast] if f is not None]
 
     if len(all_forecasts) >= 2:
-        # Count how many models agree on direction
+        # Count how many models agree on direction using prob_above, not raw comparison.
+        # Raw forecast >= threshold was wrong for the same reason as the old directional
+        # gate: a forecast of 13.9C with sigma 2.5 implies P(>=15C)=33%, which IS
+        # genuine model agreement with a YES signal even though 13.9 < 15.
+        # Reconstruct sigma from confidence (avoids threading sigma through signature):
+        #   confidence = clip(1 - (sigma_f - 3.0) / 10, 0.50, 0.95)
+        #   => sigma_f = 3.0 + (1 - confidence) * 10
+        from data.noaa import prob_above as _prob_above
+        sigma_f = 3.0 + (1.0 - confidence) * 10.0
+        sigma_for_models = sigma_f * (5 / 9) if is_celsius else sigma_f
         if direction == "YES":
-            models_agreed = sum(1 for f in all_forecasts if f >= threshold)
+            models_agreed = sum(
+                1 for f in all_forecasts
+                if _prob_above(threshold, f, sigma_for_models) >= 0.20
+            )
         else:
-            models_agreed = sum(1 for f in all_forecasts if f < threshold)
+            models_agreed = sum(
+                1 for f in all_forecasts
+                if _prob_above(threshold, f, sigma_for_models) <= 0.80
+            )
 
         # Check max spread between any two models — wide spread reduces size, not a veto
         max_spread = cfg["max_model_spread_c"] if is_celsius else cfg["max_model_spread_f"]
