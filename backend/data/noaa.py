@@ -108,12 +108,18 @@ def parse_high_low(periods: list, day_offset: int = 0) -> dict:
     return result
 
 
-def compute_sigma(day_offset: int, season_factor: float = 1.0) -> float:
+def compute_sigma(day_offset: int, is_celsius: bool = False, season_factor: float = 1.0) -> float:
     """
-    Forecast uncertainty (°F) by horizon.
+    Forecast uncertainty by horizon.
+    Base values are calibrated in F (NWS empirical norms):
+      day 0 -> 3.5F, day 1 -> 4.5F, day 2 -> 5.5F, day 3+ -> 6.0F
+
+    For Celsius cities, convert to C via x(5/9).
+    This gives day+1 sigma ~2.5C, matching ECMWF next-day empirical error.
     season_factor > 1.0 for winter (more variability), < 1.0 for summer.
     """
-    base = {0: 3.5, 1: 4.5, 2: 5.5}.get(day_offset, 6.0)
+    base_f = {0: 3.5, 1: 4.5, 2: 5.5}.get(day_offset, 6.0)
+    base = base_f * (5 / 9) if is_celsius else base_f
     return round(base * season_factor, 2)
 
 
@@ -129,9 +135,16 @@ def prob_range(low: float, high: float, forecast: float, sigma: float) -> float:
     return float(np.clip(dist.cdf(high) - dist.cdf(low), 0.01, 0.99))
 
 
-def compute_confidence(sigma: float) -> float:
-    """Map sigma → 0–1 confidence. Lower uncertainty = higher confidence."""
-    return round(float(np.clip(1.0 - (sigma - 3.0) / 10.0, 0.50, 0.95)), 3)
+def compute_confidence(sigma: float, is_celsius: bool = False) -> float:
+    """
+    Map sigma -> 0-1 confidence. Lower uncertainty = higher confidence.
+    Formula calibrated in F. For Celsius sigma, convert to F-equivalent
+    first so the confidence curve degrades correctly across day offsets.
+    Without this, Celsius sigma (~2.5) always clips to 0.95 regardless
+    of forecast horizon, making the confidence signal useless for intl cities.
+    """
+    sigma_f = sigma * (9 / 5) if is_celsius else sigma
+    return round(float(np.clip(1.0 - (sigma_f - 3.0) / 10.0, 0.50, 0.95)), 3)
 
 
 async def fetch_openmeteo_forecast(lat: float, lon: float, day_offset: int, client: httpx.AsyncClient, target_date: str = None) -> Optional[dict]:
@@ -235,8 +248,8 @@ async def fetch_city_forecast(city: dict, day_offset: int, client: httpx.AsyncCl
             forecast_high = om["high_c"]
             forecast_low = om.get("low_c")
             logger.warning(f"[{city['name']}] ECMWF unavailable, fell back to Open-Meteo GFS")
-        sigma = compute_sigma(day_offset)
-        confidence = compute_confidence(sigma)
+        sigma = compute_sigma(day_offset, is_celsius=True)
+        confidence = compute_confidence(sigma, is_celsius=True)
         current_obs = await get_openmeteo_observation(lat, lon, client)
 
         bucket_probs = {t: round(prob_above(t, forecast_high, sigma), 4) for t in thresholds}
@@ -274,8 +287,8 @@ async def fetch_city_forecast(city: dict, day_offset: int, client: httpx.AsyncCl
         if temps["high"] is None:
             return None
 
-        sigma = compute_sigma(day_offset)
-        confidence = compute_confidence(sigma)
+        sigma = compute_sigma(day_offset, is_celsius=False)
+        confidence = compute_confidence(sigma, is_celsius=False)
 
         bucket_probs = {
             t: round(prob_above(t, temps["high"], sigma), 4)
@@ -530,7 +543,7 @@ async def fetch_ecmwf_forecast_high(
                         "daily": "temperature_2m_max",
                         "temperature_unit": "celsius",
                         "timezone": "auto",
-                        "forecast_days": max(4, day_offset + 3),
+                        "forecast_days": max(3, day_offset + 2),
                         "models": "ecmwf_ifs04",
                     },
                     timeout=15.0,
