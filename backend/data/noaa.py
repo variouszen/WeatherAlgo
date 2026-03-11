@@ -530,7 +530,7 @@ async def fetch_ecmwf_forecast_high(
                         "daily": "temperature_2m_max",
                         "temperature_unit": "celsius",
                         "timezone": "auto",
-                        "forecast_days": max(3, day_offset + 2),
+                        "forecast_days": max(4, day_offset + 3),
                         "models": "ecmwf_ifs04",
                     },
                     timeout=15.0,

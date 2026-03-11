@@ -50,12 +50,12 @@ def evaluate_signal(
     threshold: float,
     noaa_prob: float,
     market_yes_price: float,
-    volume: float,
     confidence: float,
     direction: str,
     bankroll: float,
     open_city_positions: list[str],
     open_yes_positions: int,
+    volume: float = 0.0,              # kept for API compatibility — not used in filter logic
     # Forecast values for directional gate + buffer
     primary_forecast: float = None,     # NOAA for US, ECMWF for intl
     is_celsius: bool = False,
