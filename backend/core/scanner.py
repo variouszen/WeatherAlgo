@@ -402,7 +402,7 @@ async def run_scan() -> dict:
                             signal_info["score"] = score
                             best_per_city[city] = signal_info
                         log(
-                            f"SIGNAL {city} >={threshold}{unit} {direction} | "
+                            f"SIGNAL {city} | MarketDate={market_date_str} | Bucket=>={threshold}{unit} {direction} | "
                             f"Primary={primary_forecast:.1f} GFS={f'{gfs_forecast:.1f}' if gfs_forecast is not None else 'N/A'} "
                             f"ECMWF={f'{ecmwf_forecast:.1f}' if ecmwf_forecast is not None else 'N/A'} | "
                             f"Edge={edge:.1%} Models={sizing.get('models_agreed','?')} "
@@ -428,7 +428,7 @@ async def run_scan() -> dict:
                             pass
                     else:
                         if edge >= 0.05:
-                            log(f"SKIP {city} >={threshold}{unit} | {reason} | Edge={edge:.1%}")
+                            log(f"SKIP {city} | MarketDate={market_date_str} | Bucket=>={threshold}{unit} | {reason} | Edge={edge:.1%}")
 
             # ── Step 6: Open paper trades ─────────────────────────────────────
             for city, sig in best_per_city.items():
@@ -465,7 +465,7 @@ async def run_scan() -> dict:
 
                 models = sig["sizing"].get("models_agreed", "?")
                 log(
-                    f"TRADE OPENED: {city} >={sig['threshold']}{unit} {sig['direction']} | "
+                    f"TRADE OPENED: {city} | MarketDate={sig['market_date']} | Bucket=>={sig['threshold']}{unit} {sig['direction']} | "
                     f"Primary={sig['primary_forecast']:.1f} | "
                     f"Models={models} | ${sig['sizing']['size_usd']} | "
                     f"{'🌅EARLY ' if sig['is_early_window'] else ''}"
