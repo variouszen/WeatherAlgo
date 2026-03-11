@@ -163,6 +163,7 @@ def evaluate_signal(
     # ── Multi-model consensus: determine sizing factor ────────────────────────
     models_agreed = 1  # primary source always counts
     consensus_factor = 1.0
+    spread_note = ""
 
     all_forecasts = [f for f in [primary_forecast, gfs_forecast, ecmwf_forecast] if f is not None]
 
@@ -173,21 +174,21 @@ def evaluate_signal(
         else:
             models_agreed = sum(1 for f in all_forecasts if f < threshold)
 
-        # Check max spread between any two models
+        # Check max spread between any two models — wide spread reduces size, not a veto
         max_spread = cfg["max_model_spread_c"] if is_celsius else cfg["max_model_spread_f"]
         spread = max(all_forecasts) - min(all_forecasts)
+        spread_note = ""
         if spread > max_spread:
-            return False, (
-                f"Model spread {spread:.1f}° too wide (max={max_spread}°) — "
-                f"forecasts: {[round(f,1) for f in all_forecasts]}"
-            ), {}
+            # Don't veto — just lock to minimum consensus factor and note it
+            consensus_factor = cfg["consensus_reduced_factor"]
+            spread_note = f" [spread={spread:.1f}°>{max_spread}°→reduced]"
 
         total_models = len(all_forecasts)
-        if models_agreed == total_models:
-            consensus_factor = 1.0        # full size
-        elif models_agreed >= 2:
+        if models_agreed == total_models and not spread_note:
+            consensus_factor = 1.0        # full size, tight spread
+        elif models_agreed >= 2 and not spread_note:
             consensus_factor = cfg["consensus_reduced_factor"]  # reduced size
-        else:
+        elif models_agreed < 2:
             return False, (
                 f"No model consensus: only {models_agreed}/{total_models} agree on direction"
             ), {}
@@ -210,6 +211,7 @@ def evaluate_signal(
 
     sizing["models_agreed"] = models_agreed
     sizing["consensus_factor"] = consensus_factor
+    sizing["spread_note"] = spread_note
     sizing["early_window"] = is_early_window
     sizing["entry_number"] = entry_number
 

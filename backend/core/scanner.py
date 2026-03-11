@@ -382,7 +382,6 @@ async def run_scan() -> dict:
                         threshold=threshold,
                         noaa_prob=noaa_prob,
                         market_yes_price=yes_price,
-                        volume=market_data["volume"],
                         confidence=f["confidence"],
                         direction=direction,
                         bankroll=bankroll_state.balance,
@@ -433,6 +432,7 @@ async def run_scan() -> dict:
                             f"ECMWF={f'{ecmwf_forecast:.1f}' if ecmwf_forecast is not None else 'N/A'} | "
                             f"Edge={edge:.1%} Models={sizing.get('models_agreed','?')} "
                             f"EventVol=${event_vol:,.0f} BucketVol=${bucket_vol:,.0f} "
+                            f"{sizing.get('spread_note','')} "
                             f"{'🌅EARLY' if is_early else ''} {'🔁RE-ENTRY' if entry_number > 1 else ''}"
                         )
                         # ── Bucket mapping diagnostics (feature-flagged, DB write) ──
@@ -455,7 +455,7 @@ async def run_scan() -> dict:
                             pass
                     else:
                         if edge >= 0.05:
-                            log(f"SKIP {city} | MarketDate={market_date_str} | Bucket=>={threshold}{unit} | {reason} | Edge={edge:.1%}")
+                            log(f"SKIP {city} | MarketDate={market_date_str} | Bucket=>={threshold}{unit} | {reason} | Edge={edge:.1%} | EventVol=${event_vol:,.0f} BucketVol=${bucket_vol:,.0f}")
 
             # ── Step 6: Open paper trades ─────────────────────────────────────
             for city, sig in best_per_city.items():
