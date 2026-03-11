@@ -14,7 +14,7 @@ from models.database import Trade, BankrollState, ScanLog, CityCalibration
 logger = logging.getLogger(__name__)
 
 
-# ── Kelly sizing ──────────────────────────────────────────────────────────────
+# ── Kelly sizing ────────────────────────────────────────────────────────────────
 
 def compute_kelly_size(
     edge: float,
@@ -43,7 +43,7 @@ def compute_kelly_size(
     }
 
 
-# ── Signal evaluation ─────────────────────────────────────────────────────────
+# ── Signal evaluation ───────────────────────────────────────────────────────────
 
 def evaluate_signal(
     city: str,
@@ -73,11 +73,12 @@ def evaluate_signal(
     V2 filter stack. Returns (should_trade, reason, sizing_info).
 
     Hard gates (no override):
-    1. Directional gate — forecast must agree with trade direction
-    2. Buffer filter — forecast must clear threshold by min margin
+    1. Directional gate — noaa_prob must agree with trade direction
     Then confidence/sizing modifiers:
-    3. Core filters — edge, confidence, price bounds, crowd conviction
+    2. Core filters — edge, confidence, price bounds, crowd conviction
     3. Multi-model consensus — affects sizing, not a hard veto unless all disagree
+       Validators are plausibility-gated: any reading >3F / 1.7C from primary
+       is discarded as corrupt data (wrong day offset, wrong station, etc.)
     4. Early window boost — slightly relaxes confidence, boosts sizing
     5. Re-entry rules — escalating EV requirement, cooldown, crowd move check
     """
@@ -86,13 +87,9 @@ def evaluate_signal(
     entry_price = market_yes_price if direction == "YES" else (1 - market_yes_price)
     edge = abs(noaa_prob - market_yes_price)
 
-    # ── HARD GATE 1: Directional gate ────────────────────────────────────────
+    # ── HARD GATE 1: Directional gate ────────────────────────────────────────────
     # Use noaa_prob (cumulative CDF), not raw forecast vs threshold.
-    # The old forecast < threshold comparison was too strict: with sigma=4.5,
-    # a forecast of 13.9°C implies P(>=14°C) ≈ 49% — a legitimate YES signal
-    # if the market only prices it at 20%. The probability-based gate correctly
-    # allows near-threshold trades while still blocking truly nonsensical ones.
-    # Thresholds: YES requires NOAA ≥ 15%, NO requires NOAA ≤ 85%.
+    # Thresholds: YES requires NOAA >= 15%, NO requires NOAA <= 85%.
     MIN_DIR_PROB_YES = 0.15
     MAX_DIR_PROB_NO  = 0.85
     if direction == "YES" and noaa_prob < MIN_DIR_PROB_YES:
@@ -104,7 +101,7 @@ def evaluate_signal(
             f"Directional gate: P(>={threshold}) = {noaa_prob:.1%} too high for NO"
         ), {}
 
-    # ── Filter 2: Minimum edge ────────────────────────────────────────────────
+    # ── Filter 2: Minimum edge ───────────────────────────────────────────────────
     effective_min_edge = cfg["min_edge"]
     if entry_number > 1:
         effective_min_edge = cfg["min_edge"] + cfg["reentry_min_edge_premium"]
@@ -112,7 +109,7 @@ def evaluate_signal(
     if edge < effective_min_edge:
         return False, f"Edge {edge:.1%} < min {effective_min_edge:.1%}", {}
 
-    # ── Filter 3: Confidence ──────────────────────────────────────────────────
+    # ── Filter 3: Confidence ─────────────────────────────────────────────────────
     effective_min_confidence = cfg["min_confidence"]
     if is_early_window:
         effective_min_confidence = max(0.50, cfg["min_confidence"] - cfg["early_window_confidence_boost"])
@@ -120,30 +117,29 @@ def evaluate_signal(
     if confidence < effective_min_confidence:
         return False, f"Confidence {confidence:.1%} < min {effective_min_confidence:.1%}", {}
 
-    # ── Filter 4: Price bounds ────────────────────────────────────────────────
+    # ── Filter 4: Price bounds ───────────────────────────────────────────────────
     if direction == "YES" and market_yes_price > cfg["max_yes_price"]:
         return False, f"YES price {market_yes_price:.2f} > max {cfg['max_yes_price']:.2f}", {}
     if direction == "NO" and market_yes_price < cfg["min_no_price"]:
         return False, f"NO side: YES price {market_yes_price:.2f} < floor {cfg['min_no_price']:.2f}", {}
 
-    # ── Filter 5: Crowd conviction ────────────────────────────────────────────
+    # ── Filter 5: Crowd conviction ───────────────────────────────────────────────
     if direction == "NO" and market_yes_price > cfg["max_yes_price_for_no"]:
         return False, (
             f"Crowd conviction too high: YES at {market_yes_price:.2f} > "
             f"{cfg['max_yes_price_for_no']:.2f} — skipping NO"
         ), {}
 
-    # ── Filter 6: One position per city (unless re-entry enabled) ────────────
+    # ── Filter 6: One position per city (unless re-entry enabled) ───────────────
     if city in open_city_positions and entry_number == 1:
         return False, f"Already have open position in {city}", {}
 
-    # ── Filter 7: Bankroll floor ──────────────────────────────────────────────
+    # ── Filter 7: Bankroll floor ─────────────────────────────────────────────────
     if bankroll < cfg["bankroll_floor"]:
         return False, f"Bankroll ${bankroll:.2f} below floor ${cfg['bankroll_floor']:.2f}", {}
 
-    # ── Re-entry checks (only applies when entry_number > 1) ─────────────────
+    # ── Re-entry checks (only applies when entry_number > 1) ────────────────────
     if entry_number > 1 and cfg.get("reentry_enabled"):
-        # Crowd price must have moved materially
         if crowd_price_at_prior is not None:
             crowd_move = abs(market_yes_price - crowd_price_at_prior)
             if crowd_move < cfg["reentry_min_crowd_move"]:
@@ -152,7 +148,6 @@ def evaluate_signal(
                     f"— no material repricing"
                 ), {}
 
-        # Edge must beat prior high-water mark (this is raw edge comparison, not true EV)
         if prior_entry_edge is not None:
             hwm = min(prior_entry_edge, cfg["reentry_edge_hwm_cap"])
             if edge < hwm + cfg["reentry_min_edge_improvement"]:
@@ -161,23 +156,34 @@ def evaluate_signal(
                     f"premium {cfg['reentry_min_edge_improvement']:.1%}"
                 ), {}
 
-        # Cap re-entries
         if entry_number > cfg["reentry_max_per_city"] + 1:
             return False, f"Re-entry: max {cfg['reentry_max_per_city']} re-entries reached for {city}", {}
 
-    # ── Multi-model consensus: determine sizing factor ────────────────────────
+    # ── Multi-model consensus: determine sizing factor ───────────────────────────
     models_agreed = 1  # primary source always counts
     consensus_factor = 1.0
     spread_note = ""
 
-    all_forecasts = [f for f in [primary_forecast, gfs_forecast, ecmwf_forecast] if f is not None]
+    # Plausibility gate: discard any validator deviating more than 3F / 1.7C
+    # from primary. This is a data integrity check, not model disagreement tolerance.
+    # A 10F+ delta means wrong day offset, wrong station, or observed vs forecast —
+    # not a second opinion. Discarded validators don't vote, don't affect sizing,
+    # don't exist. Primary is sovereign and is never filtered.
+    if primary_forecast is not None:
+        _plaus = cfg.get("validator_plausibility_threshold_c", 1.7) if is_celsius \
+                 else cfg.get("validator_plausibility_threshold_f", 3.0)
+        _valid_validators = [
+            v for v in [gfs_forecast, ecmwf_forecast]
+            if v is not None and abs(v - primary_forecast) <= _plaus
+        ]
+    else:
+        _valid_validators = [v for v in [gfs_forecast, ecmwf_forecast] if v is not None]
+
+    all_forecasts = ([primary_forecast] if primary_forecast is not None else []) + _valid_validators
 
     if len(all_forecasts) >= 2:
         # Count how many models agree on direction using prob_above, not raw comparison.
-        # Raw forecast >= threshold was wrong for the same reason as the old directional
-        # gate: a forecast of 13.9C with sigma 2.5 implies P(>=15C)=33%, which IS
-        # genuine model agreement with a YES signal even though 13.9 < 15.
-        # Reconstruct sigma from confidence (avoids threading sigma through signature):
+        # Reconstruct sigma from confidence:
         #   confidence = clip(1 - (sigma_f - 3.0) / 10, 0.50, 0.95)
         #   => sigma_f = 3.0 + (1 - confidence) * 10
         from data.noaa import prob_above as _prob_above
@@ -199,28 +205,25 @@ def evaluate_signal(
         spread = max(all_forecasts) - min(all_forecasts)
         spread_note = ""
         if spread > max_spread:
-            # Don't veto — just lock to minimum consensus factor and note it
             consensus_factor = cfg["consensus_reduced_factor"]
-            spread_note = f" [spread={spread:.1f}°>{max_spread}°→reduced]"
+            spread_note = f" [spread={spread:.1f}>{max_spread}->reduced]"
 
         total_models = len(all_forecasts)
         if models_agreed == total_models and not spread_note:
-            consensus_factor = 1.0        # full size, tight spread
+            consensus_factor = 1.0
         elif models_agreed >= 2 and not spread_note:
-            consensus_factor = cfg["consensus_reduced_factor"]  # reduced size
+            consensus_factor = cfg["consensus_reduced_factor"]
         elif models_agreed < 2:
             return False, (
                 f"No model consensus: only {models_agreed}/{total_models} agree on direction"
             ), {}
 
-    # ── Compute sizing ────────────────────────────────────────────────────────
+    # ── Compute sizing ───────────────────────────────────────────────────────────
     sizing = compute_kelly_size(edge, entry_price, confidence, bankroll, open_yes_positions)
 
-    # Apply consensus factor
     sizing["size_usd"] = round(sizing["size_usd"] * consensus_factor, 2)
     sizing["size_usd"] = max(cfg["min_position_usd"], sizing["size_usd"])
 
-    # Apply early window boost
     if is_early_window:
         boosted = round(sizing["size_usd"] * cfg["early_window_kelly_boost"], 2)
         max_size = bankroll * cfg["max_position_pct"]
@@ -238,7 +241,7 @@ def evaluate_signal(
     return True, "ALL_FILTERS_PASSED", sizing
 
 
-# ── Database operations ───────────────────────────────────────────────────────
+# ── Database operations ──────────────────────────────────────────────────────────
 
 async def get_bankroll(session: AsyncSession) -> BankrollState:
     result = await session.execute(select(BankrollState).where(BankrollState.id == 1))
@@ -359,8 +362,6 @@ async def settle_trade(
 
     await session.flush()
 
-    # Derive unit from market_condition field (set at trade open as "High >= {threshold}{unit}")
-    # This is reliable for any temperature range — no threshold-range hacks needed.
     unit = "C" if str(trade.market_condition or "").endswith("C") else "F"
     logger.info(
         f"[SETTLE] {trade.city} >={trade.threshold_f}{unit} {trade.direction} | "
@@ -380,8 +381,6 @@ async def log_calibration(
     sigma: float,
     market_date: str = None,
 ):
-    # Use the actual market date being settled, not today's date.
-    # Falling back to today only if market_date is somehow missing.
     cal_date = market_date or date.today().isoformat()
     existing = await session.execute(
         select(CityCalibration).where(

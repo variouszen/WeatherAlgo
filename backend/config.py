@@ -43,6 +43,10 @@ BOT_CONFIG = {
     # Max raw forecast spread between any two models before skipping entirely
     "max_model_spread_f": 6.0,
     "max_model_spread_c": 3.0,
+    # Plausibility gate: validators deviating more than this from primary are discarded
+    # as corrupt data (wrong day offset, wrong station) rather than genuine disagreement
+    "validator_plausibility_threshold_f": 3.0,
+    "validator_plausibility_threshold_c": 1.7,
 
     # --- Crowd conviction filters ---
     "max_yes_price_for_no": 0.80,   # don't fade crowd when YES > 80¢
