@@ -694,6 +694,9 @@
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   }
 
+  const CELSIUS_CITIES = new Set(["London", "Seoul", "Paris", "Toronto"]);
+  function tempUnit(city) { return CELSIUS_CITIES.has(city) ? 'C' : 'F'; }
+
   function fmtDate(iso) {
     if (!iso) return '—';
     const d = new Date(iso);
@@ -850,9 +853,9 @@
       <div class="trade-item">
         <span class="trade-side ${t.direction.toLowerCase()}">${t.direction}</span>
         <div class="trade-info">
-          <div class="trade-city">${t.city} — ${t.threshold_f}° ${t.market_condition && t.market_condition.includes('°C') ? 'C' : 'F'}</div>
+          <div class="trade-city">${t.city} — ${t.threshold_f}° ${tempUnit(t.city)}</div>
           <div class="trade-detail">Entry: ${t.entry_price} · Edge: ${t.edge_pct.toFixed(1)}% · NOAA: ${t.noaa_forecast_high}°</div>
-          <div class="trade-detail" style="opacity:0.5; font-size:0.75em; margin-top:2px;">Opened: ${fmtDate(t.opened_at)}</div>
+          <div class="trade-detail">Bet for: <strong style="color:var(--cyan)">${t.market_date || '—'}</strong> · Opened: ${fmtDate(t.opened_at)}</div>
         </div>
         <span class="trade-stake">${fmt$(t.position_size_usd)}</span>
         <span class="trade-pnl open">OPEN</span>
@@ -874,7 +877,7 @@
         <div class="trade-item">
           <span class="trade-side ${t.direction.toLowerCase()}">${t.direction}</span>
           <div class="trade-info">
-            <div class="trade-city">${t.city} — ${t.threshold_f}°F</div>
+            <div class="trade-city">${t.city} — ${t.threshold_f}° ${tempUnit(t.city)}</div>
             <div class="trade-detail">${fmtDate(t.opened_at)} · Edge: ${t.edge_pct.toFixed(1)}%</div>
           </div>
           <span class="trade-stake">${fmt$(t.position_size_usd)}</span>
