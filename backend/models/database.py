@@ -86,7 +86,7 @@ class Trade(Base):
 
     # Re-entry tracking
     entry_number: Mapped[int] = mapped_column(Integer, default=1)                  # 1=first, 2=re-entry, etc
-    prior_entry_ev: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # EV of previous entry
+    prior_entry_edge: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # edge of previous entry
     crowd_price_at_prior: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
     # Calibration tracking
@@ -120,7 +120,7 @@ class CityCalibration(Base):
     city: Mapped[str] = mapped_column(String(50))
     station_id: Mapped[str] = mapped_column(String(10))
     date: Mapped[str] = mapped_column(String(20))               # YYYY-MM-DD
-    forecast_high_f: Mapped[float] = mapped_column(Float)
+    forecast_high: Mapped[float] = mapped_column("forecast_high_f", Float)  # DB col kept for compat
     actual_high_f: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     forecast_error_f: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     sigma_used: Mapped[float] = mapped_column(Float)

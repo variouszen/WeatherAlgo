@@ -30,25 +30,46 @@ city_by_name = {c["name"]: c for c in CITIES}
 # Tracks per-city state within a single day: entry count, high-water mark EV,
 # last entry price (for crowd move check), last entry time (for cooldown)
 # Resets at midnight UTC
-_reentry_state: dict[str, dict] = {}
-_reentry_state_date: str = ""
+async def _get_reentry_state_from_db(session, city: str, market_date: str) -> dict:
+    """
+    Derive re-entry state for a city/date from existing DB trades.
+    This is persistent across restarts and deploys.
+    Falls back to zero state if no trades exist.
+    """
+    from sqlalchemy import select
+    from models.database import Trade as TradeModel
+    today_str = market_date or datetime.now(timezone.utc).date().isoformat()
 
+    result = await session.execute(
+        select(TradeModel)
+        .where(TradeModel.city == city)
+        .where(TradeModel.market_date == today_str)
+        .where(TradeModel.status == "OPEN")
+        .order_by(TradeModel.opened_at.desc())
+    )
+    trades = result.scalars().all()
 
-def _get_reentry_state(city: str) -> dict:
-    """Get or init re-entry state for a city today."""
-    global _reentry_state, _reentry_state_date
-    today = datetime.now(timezone.utc).date().isoformat()
-    if _reentry_state_date != today:
-        _reentry_state = {}
-        _reentry_state_date = today
-    if city not in _reentry_state:
-        _reentry_state[city] = {
+    if not trades:
+        return {
             "entry_count": 0,
-            "ev_hwm": 0.0,
+            "edge_hwm": 0.0,
             "last_crowd_price": None,
             "last_entry_time": None,
         }
-    return _reentry_state[city]
+
+    # Derive state from existing trades
+    entry_count = len(trades)
+    edge_hwm = max((t.edge_pct for t in trades), default=0.0)
+    latest = trades[0]  # most recent
+    last_crowd_price = latest.market_yes_price
+    last_entry_time = latest.opened_at.replace(tzinfo=timezone.utc) if latest.opened_at.tzinfo is None else latest.opened_at
+
+    return {
+        "entry_count": entry_count,
+        "edge_hwm": edge_hwm,
+        "last_crowd_price": last_crowd_price,
+        "last_entry_time": last_entry_time,
+    }
 
 
 def _is_early_window(end_date_str: str) -> bool:
@@ -146,70 +167,34 @@ async def run_scan() -> dict:
                 scan_result["errors"].append("Daily loss cap hit")
                 return scan_result
 
-            # ── Step 1: Discover required day offsets from live markets ─────
-            # First fetch markets, then determine which days we need forecasts
-            # for — handles same-day, tomorrow, and multi-day-ahead markets.
-            log("Fetching Polymarket prices (pre-scan for day offsets)...")
+            # ── Step 1: Fetch primary forecasts ───────────────────────────────
+            log("Fetching primary forecasts (NOAA/ECMWF)...")
             try:
-                market_map = await build_market_map(city_names, TEMP_THRESHOLDS_F + TEMP_THRESHOLDS_C)
-                log(f"Polymarket: {len(market_map)} city/threshold markets")
-            except Exception as e:
-                log(f"Polymarket fetch failed: {e}", "WARN")
-                scan_result["errors"].append(f"Polymarket: {e}")
-                market_map = {}
-
-            # Compute required day offsets from market end_dates
-            utc_today = datetime.now(timezone.utc).date()
-            required_offsets = set([0])  # always fetch today as fallback
-            for mkt in market_map.values():
-                end_date_str = mkt.get("end_date", "")
-                try:
-                    if end_date_str:
-                        ed = datetime.fromisoformat(str(end_date_str).replace("Z", "+00:00"))
-                        diff = (ed.date() - utc_today).days
-                        if 0 <= diff <= 7:  # only fetch up to 7 days out
-                            required_offsets.add(diff)
-                except Exception:
-                    pass
-            log(f"Fetching forecasts for day offsets: {sorted(required_offsets)}")
-
-            # ── Step 2: Fetch primary forecasts for all required offsets ──────
-            log("Fetching primary forecasts...")
-            forecast_map: dict[str, dict] = {}  # city -> {day_offset: forecast}
-            forecasts_d0 = []
-            try:
-                for offset in sorted(required_offsets):
-                    day_forecasts = await fetch_all_cities(day_offset=offset)
-                    if offset == 0:
-                        forecasts_d0 = day_forecasts
-                        scan_result["cities_scanned"] = len(day_forecasts)
-                    for f in day_forecasts:
-                        forecast_map.setdefault(f["city"], {})[offset] = f
-                log(f"Primary forecasts: {len(forecasts_d0)} cities x{len(required_offsets)} days")
+                forecasts = await fetch_all_cities(day_offset=0)
+                scan_result["cities_scanned"] = len(forecasts)
+                log(f"Primary forecasts: {len(forecasts)} cities")
             except Exception as e:
                 log(f"Primary forecast fetch failed: {e}", "WARN")
                 scan_result["errors"].append(f"Forecast: {e}")
                 return scan_result
 
-            # ── Step 3a: Fetch GFS + ECMWF validators for all required offsets
+            forecast_map = {f["city"]: f for f in forecasts}
+
+            # ── Step 2: Fetch GFS + ECMWF validators (serialized) ─────────────
             log("Fetching GFS + ECMWF validator forecasts...")
-            validator_map: dict[str, dict] = {}  # city -> {day_offset: {gfs, ecmwf}}
+            validator_map: dict[str, dict] = {}
             for i, city_cfg in enumerate(CITIES):
                 if i > 0:
                     await asyncio.sleep(0.5)
                 try:
-                    city_validators = {}
-                    for offset in sorted(required_offsets):
-                        v = await fetch_validator_forecasts(city_cfg, day_offset=offset)
-                        city_validators[offset] = v
-                    validator_map[city_cfg["name"]] = city_validators
-                    v0 = city_validators.get(0, {})
-                    gfs_val = f"{v0['gfs']:.1f}" if v0.get('gfs') else "N/A"
-                    ecmwf_val = f"{v0['ecmwf']:.1f}" if v0.get('ecmwf') else "N/A"
+                    validators = await fetch_validator_forecasts(city_cfg, day_offset=0)
+                    validator_map[city_cfg["name"]] = validators
+                    gfs_val = f"{validators['gfs']:.1f}" if validators['gfs'] is not None else "N/A"
+                    ecmwf_val = f"{validators['ecmwf']:.1f}" if validators['ecmwf'] is not None else "N/A"
                     log(f"Validators {city_cfg['name']}: GFS={gfs_val} ECMWF={ecmwf_val}")
                 except Exception as e:
                     log(f"Validator fetch failed for {city_cfg['name']}: {e}", "WARN")
-                    validator_map[city_cfg["name"]] = {o: {"gfs": None, "ecmwf": None} for o in required_offsets}
+                    validator_map[city_cfg["name"]] = {"gfs": None, "ecmwf": None}
 
             # ── Step 3: Settle open positions ─────────────────────────────────
             open_positions = await get_open_positions(session)
@@ -220,10 +205,19 @@ async def run_scan() -> dict:
             settlement_hour_utc = 20
 
             for trade in open_positions:
-                trade_date = trade.opened_at.date()
-                if trade_date >= today:
+                # Use market_date (the temp date being bet on) for settlement.
+                # Fall back to opened_at.date() only if market_date is missing.
+                if trade.market_date:
+                    try:
+                        trade_date = datetime.strptime(trade.market_date, "%Y-%m-%d").date()
+                    except Exception:
+                        trade_date = trade.opened_at.date()
+                else:
+                    trade_date = trade.opened_at.date()
+
+                if trade_date > today:
                     continue
-                if trade_date < today and now_utc.hour < settlement_hour_utc:
+                if trade_date == today and now_utc.hour < settlement_hour_utc:
                     continue
 
                 city_cfg = city_by_name.get(trade.city)
@@ -251,11 +245,19 @@ async def run_scan() -> dict:
                 )
                 await log_calibration(
                     session, trade.city, city_cfg["station"],
-                    trade.noaa_forecast_high, actual_high, trade.noaa_sigma
+                    trade.noaa_forecast_high, actual_high, trade.noaa_sigma,
+                    market_date=trade.market_date,
                 )
 
-            # ── Step 4: Polymarket already fetched in Step 1 ────────────────
-            # market_map populated above for day offset detection
+            # ── Step 4: Fetch Polymarket prices ───────────────────────────────
+            log("Fetching Polymarket prices...")
+            try:
+                market_map = await build_market_map(city_names, TEMP_THRESHOLDS_F + TEMP_THRESHOLDS_C)
+                log(f"Polymarket: {len(market_map)} city/threshold markets")
+            except Exception as e:
+                log(f"Polymarket fetch failed: {e}", "WARN")
+                scan_result["errors"].append(f"Polymarket: {e}")
+                market_map = {}
 
             # ── Step 5: Evaluate signals ──────────────────────────────────────
             open_after_settle = await get_open_positions(session)
@@ -264,19 +266,17 @@ async def run_scan() -> dict:
 
             best_per_city: dict[str, dict] = {}
 
-            utc_today = datetime.now(timezone.utc).date()
-
-            for city, city_forecasts in forecast_map.items():
+            for f in forecasts:
+                city = f["city"]
                 city_cfg_item = city_by_name.get(city, {})
                 is_celsius = city_cfg_item.get("celsius", False)
                 thresholds_for_city = TEMP_THRESHOLDS_C if is_celsius else TEMP_THRESHOLDS_F
                 unit = "C" if is_celsius else "F"
 
-                # Re-entry state for this city
-                reentry = _get_reentry_state(city)
-                entry_number = reentry["entry_count"] + 1
-                prior_ev = reentry["ev_hwm"] if reentry["entry_count"] > 0 else None
-                last_crowd_price = reentry["last_crowd_price"]
+                primary_forecast = f.get("forecast_high")
+                validators = validator_map.get(city, {"gfs": None, "ecmwf": None})
+                gfs_forecast = validators.get("gfs")
+                ecmwf_forecast = validators.get("ecmwf")
 
                 for threshold in thresholds_for_city:
                     mkt_key = (city, threshold)
@@ -285,40 +285,30 @@ async def run_scan() -> dict:
 
                     market_data = market_map[mkt_key]
                     yes_price = market_data["yes_price"]
-                    end_date_str = market_data.get("end_date", "")
-
-                    # ── Compute day_offset from market end_date ───────────────
-                    # This ensures we compare the forecast for the SAME day
-                    # the market resolves, not just today's forecast.
-                    day_offset = 0
-                    try:
-                        if end_date_str:
-                            ed = datetime.fromisoformat(str(end_date_str).replace("Z", "+00:00"))
-                            diff = (ed.date() - utc_today).days
-                            day_offset = max(0, diff)  # no clamp — use actual market date
-                    except Exception:
-                        day_offset = 0
-
-                    # Pick the forecast for the correct day
-                    f = city_forecasts.get(day_offset) or city_forecasts.get(0)
-                    if not f:
-                        continue
-
-                    primary_forecast = f.get("forecast_high_f")
-                    city_validators = validator_map.get(city, {})
-                    validators = city_validators.get(day_offset) or city_validators.get(0) or {"gfs": None, "ecmwf": None}
-                    gfs_forecast = validators.get("gfs")
-                    ecmwf_forecast = validators.get("ecmwf")
-
                     noaa_prob = f["bucket_probs"].get(threshold, 0)
                     direction = "YES" if noaa_prob > yes_price else "NO"
 
+                    end_date_str = market_data.get("end_date", "")
                     is_early = _is_early_window(end_date_str)
+
+                    # Derive market_date from end_date — used for reentry keying and trade.market_date
+                    # This ensures reentry is keyed per city+market-date, not city+today
+                    market_date_str = end_date_str[:10] if end_date_str else datetime.now(timezone.utc).date().isoformat()
+
+                    # Re-entry state from DB keyed by city + actual market date
+                    reentry = await _get_reentry_state_from_db(session, city, market_date_str)
+                    entry_number = reentry["entry_count"] + 1
+                    prior_ev = reentry["edge_hwm"] if reentry["entry_count"] > 0 else None
+                    last_crowd_price = reentry["last_crowd_price"]
+
                     too_late_reentry = _is_too_late_for_reentry(end_date_str) if entry_number > 1 else False
 
-                    # Check cooldown for re-entry
+                    # Check cooldown for re-entry (using DB-derived last_entry_time)
                     if entry_number > 1 and reentry["last_entry_time"]:
-                        mins_since = (datetime.now(timezone.utc) - reentry["last_entry_time"]).total_seconds() / 60
+                        last_t = reentry["last_entry_time"]
+                        if last_t.tzinfo is None:
+                            last_t = last_t.replace(tzinfo=timezone.utc)
+                        mins_since = (datetime.now(timezone.utc) - last_t).total_seconds() / 60
                         if mins_since < cfg["reentry_cooldown_minutes"]:
                             continue
 
@@ -342,7 +332,7 @@ async def run_scan() -> dict:
                         ecmwf_forecast=ecmwf_forecast,
                         is_early_window=is_early,
                         entry_number=entry_number,
-                        prior_entry_ev=prior_ev,
+                        prior_entry_edge=prior_ev,
                         crowd_price_at_prior=last_crowd_price,
                     )
 
@@ -365,15 +355,20 @@ async def run_scan() -> dict:
                             "ecmwf_forecast": ecmwf_forecast,
                             "is_early_window": is_early,
                             "entry_number": entry_number,
-                            "prior_entry_ev": prior_ev,
+                            "prior_entry_edge": prior_ev,
                             "crowd_price_at_prior": last_crowd_price,
+                            "market_date": market_date_str,
                         }
-                        if city not in best_per_city or edge > best_per_city[city]["edge"]:
+                        # Rank by edge * size_usd — better than raw edge alone
+                        # as it accounts for consensus factor and kelly sizing
+                        score = edge * sizing.get("size_usd", 0)
+                        if city not in best_per_city or score > best_per_city[city].get("score", 0):
+                            signal_info["score"] = score
                             best_per_city[city] = signal_info
                         log(
                             f"SIGNAL {city} >={threshold}{unit} {direction} | "
-                            f"Primary={primary_forecast:.1f} GFS={f'{gfs_forecast:.1f}' if gfs_forecast else 'N/A'} "
-                            f"ECMWF={f'{ecmwf_forecast:.1f}' if ecmwf_forecast else 'N/A'} | "
+                            f"Primary={primary_forecast:.1f} GFS={f'{gfs_forecast:.1f}' if gfs_forecast is not None else 'N/A'} "
+                            f"ECMWF={f'{ecmwf_forecast:.1f}' if ecmwf_forecast is not None else 'N/A'} | "
                             f"Edge={edge:.1%} Models={sizing.get('models_agreed','?')} "
                             f"{'🌅EARLY' if is_early else ''} {'🔁RE-ENTRY' if entry_number > 1 else ''}"
                         )
@@ -390,8 +385,9 @@ async def run_scan() -> dict:
                 # Inject extra data into forecast dict for open_paper_trade
                 sig["forecast"]["gfs_forecast"] = sig.get("gfs_forecast")
                 sig["forecast"]["ecmwf_forecast"] = sig.get("ecmwf_forecast")
-                sig["forecast"]["prior_entry_ev"] = sig.get("prior_entry_ev")
+                sig["forecast"]["prior_entry_edge"] = sig.get("prior_entry_edge")
                 sig["forecast"]["crowd_price_at_prior"] = sig.get("crowd_price_at_prior")
+                sig["forecast"]["market_date"] = sig.get("market_date")
 
                 trade = await open_paper_trade(
                     session=session,
@@ -406,11 +402,8 @@ async def run_scan() -> dict:
                 )
 
                 # Update re-entry state
-                reentry = _get_reentry_state(city)
-                reentry["entry_count"] += 1
-                reentry["ev_hwm"] = max(reentry["ev_hwm"], sig["edge"])
-                reentry["last_crowd_price"] = sig["yes_price"]
-                reentry["last_entry_time"] = datetime.now(timezone.utc)
+                # Re-entry state is DB-derived — no in-memory update needed.
+                # The next scan will read the newly opened trade from the DB.
 
                 if sig["direction"] == "YES":
                     open_yes_count += 1
@@ -442,29 +435,3 @@ async def run_scan() -> dict:
     scan_result["duration_ms"] = duration_ms
     log(f"Scan complete in {duration_ms}ms | Bankroll: ${bankroll_state.balance:.2f}")
     return scan_result
-
-import logging
-import asyncio
-import time
-from datetime import datetime
-from sqlalchemy.ext.asyncio import AsyncSession
-import sys, os
-
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import BOT_CONFIG, CITIES, TEMP_THRESHOLDS_F, TEMP_THRESHOLDS_C, TEMP_THRESHOLDS
-from data.noaa import fetch_all_cities, get_nws_daily_high, get_openmeteo_daily_high, get_openmeteo_forecast_high
-from data.polymarket import build_market_map
-from core.signals import (
-    get_bankroll, get_open_positions,
-    open_paper_trade, settle_trade,
-    evaluate_signal, log_calibration,
-    reset_daily_loss,
-)
-from models.database import AsyncSessionLocal, ScanLog
-
-logger = logging.getLogger(__name__)
-
-city_names = [c["name"] for c in CITIES]
-city_by_name = {c["name"]: c for c in CITIES}
-
-

@@ -216,17 +216,25 @@ async def fetch_city_forecast(city: dict, day_offset: int, client: httpx.AsyncCl
     thresholds = TEMP_THRESHOLDS_C if is_celsius else TEMP_THRESHOLDS_F
 
     if is_celsius:
-        # ── International: Open-Meteo ─────────────────────────────────────────
-        # Always fetch by explicit UTC date to avoid day-offset bug at night.
-        # Polymarket markets resolve on tomorrow UTC, so compute that date.
+        # ── International: ECMWF primary, Open-Meteo GFS as fallback ──────────
+        # ECMWF IFS is the most accurate global model for 1-5 day forecasts.
         utc_now = datetime.now(timezone.utc)
-        target_date = (utc_now + timedelta(days=day_offset + 1)).strftime("%Y-%m-%d") if utc_now.hour < 12 else (utc_now + timedelta(days=day_offset)).strftime("%Y-%m-%d")
-        om = await fetch_openmeteo_forecast(lat, lon, day_offset, client, target_date=target_date)
-        if not om:
-            return None
+        # Use straight UTC date + day_offset — consistent with ECMWF/GFS validator logic.
+        # day_offset is already market-date-derived by the scanner, so no noon adjustment needed.
+        target_date = (utc_now.date() + timedelta(days=day_offset)).strftime("%Y-%m-%d")
 
-        forecast_high = om["high_c"]  # °C
-        forecast_low  = om.get("low_c")
+        # Primary: ECMWF
+        forecast_low = None  # ECMWF returns high only; set from om only if fallback runs
+        forecast_high = await fetch_ecmwf_forecast_high(lat, lon, day_offset=day_offset, celsius=True)
+
+        # Fallback: generic Open-Meteo (GFS-based) if ECMWF unavailable
+        if forecast_high is None:
+            om = await fetch_openmeteo_forecast(lat, lon, day_offset, client, target_date=target_date)
+            if not om:
+                return None
+            forecast_high = om["high_c"]
+            forecast_low = om.get("low_c")
+            logger.warning(f"[{city['name']}] ECMWF unavailable, fell back to Open-Meteo GFS")
         sigma = compute_sigma(day_offset)
         confidence = compute_confidence(sigma)
         current_obs = await get_openmeteo_observation(lat, lon, client)
@@ -238,18 +246,18 @@ async def fetch_city_forecast(city: dict, day_offset: int, client: httpx.AsyncCl
             "station": city["station"],
             "lat": lat,
             "lon": lon,
-            "forecast_high_f": forecast_high,   # °C stored in this field for intl cities
-            "forecast_high_c": forecast_high,
-            "forecast_low_f": forecast_low,
+            "forecast_high": forecast_high,     # unit-agnostic: °C for intl, °F for US
+            "forecast_high_c": forecast_high,   # kept for backwards compat
+            "forecast_low": forecast_low,
             "condition": f"Day +{day_offset}",
             "detailed_forecast": "",
             "day_offset": day_offset,
             "sigma": sigma,
             "confidence": confidence,
             "bucket_probs": bucket_probs,
-            "current_obs_f": current_obs,        # °C for intl
+            "current_obs": current_obs,
             "unit": "C",
-            "source": "Open-Meteo",
+            "source": "ECMWF" if forecast_low is None else "Open-Meteo-GFS",
         }
 
     else:
@@ -281,15 +289,15 @@ async def fetch_city_forecast(city: dict, day_offset: int, client: httpx.AsyncCl
             "station": city["station"],
             "lat": lat,
             "lon": lon,
-            "forecast_high_f": temps["high"],
-            "forecast_low_f": temps["low"],
+            "forecast_high": temps["high"],
+            "forecast_low": temps["low"],
             "condition": temps["high_label"],
             "detailed_forecast": temps["detailed_forecast"],
             "day_offset": day_offset,
             "sigma": sigma,
             "confidence": confidence,
             "bucket_probs": bucket_probs,
-            "current_obs_f": current_obs,
+            "current_obs": current_obs,
             "unit": "F",
             "source": "NOAA/NWS",
         }
@@ -381,18 +389,14 @@ async def get_openmeteo_forecast_high(
     """
     Fetch today's (or day_offset) forecast high from Open-Meteo forecast API.
     Returns °F for US cities (celsius=False) or °C for international (celsius=True).
-    Uses the city's local date so Seoul/London don't get day mismatches at UTC midnight.
+    Uses UTC date with day_offset. city_timezone kept for API compatibility but unused.
     Used as the second source for multi-source consensus filtering.
     """
-    from datetime import timedelta, date, datetime as _datetime
-    try:
-        import pytz
-        local_tz = pytz.timezone(city_timezone)
-        local_now = _datetime.now(local_tz)
-        target_date = (local_now.date() + timedelta(days=day_offset)).isoformat()
-    except Exception:
-        target_date = (date.today() + timedelta(days=day_offset)).isoformat()
-        logger.warning(f"[OM Forecast] Could not resolve timezone '{city_timezone}', falling back to UTC date")
+    from datetime import timedelta, date, datetime as _datetime, timezone as _tz
+    # Use UTC explicitly — no pytz required, avoids drift warnings on Railway
+    utc_now = _datetime.now(_tz.utc)
+    target_date = (utc_now.date() + timedelta(days=day_offset)).isoformat()
+    # Note: uses UTC date, not city local time. city_timezone param is unused but kept for API compat.
 
     temperature_unit = "celsius"  # Open-Meteo always returns °C; we convert if needed
 
@@ -455,14 +459,10 @@ async def fetch_gfs_forecast_high(
     Returns °F for US cities (celsius=False) or °C for international (celsius=True).
     GFS is independent from NOAA point forecasts — genuine second signal for US cities.
     """
-    from datetime import timedelta, date, datetime as _datetime
-    try:
-        import pytz
-        local_tz = pytz.timezone(city_timezone)
-        local_now = _datetime.now(local_tz)
-        target_date = (local_now.date() + timedelta(days=day_offset)).isoformat()
-    except Exception:
-        target_date = (date.today() + timedelta(days=day_offset)).isoformat()
+    from datetime import timedelta, date, datetime as _datetime, timezone as _tz
+    # Use UTC explicitly — no pytz required, avoids drift warnings on Railway
+    utc_now = _datetime.now(_tz.utc)
+    target_date = (utc_now.date() + timedelta(days=day_offset)).isoformat()
 
     for attempt in range(3):
         try:
@@ -514,14 +514,10 @@ async def fetch_ecmwf_forecast_high(
     ECMWF is generally the most accurate global model for 1-5 day forecasts.
     Returns °F for US cities (celsius=False) or °C for international (celsius=True).
     """
-    from datetime import timedelta, date, datetime as _datetime
-    try:
-        import pytz
-        local_tz = pytz.timezone(city_timezone)
-        local_now = _datetime.now(local_tz)
-        target_date = (local_now.date() + timedelta(days=day_offset)).isoformat()
-    except Exception:
-        target_date = (date.today() + timedelta(days=day_offset)).isoformat()
+    from datetime import timedelta, date, datetime as _datetime, timezone as _tz
+    # Use UTC explicitly — no pytz required, avoids drift warnings on Railway
+    utc_now = _datetime.now(_tz.utc)
+    target_date = (utc_now.date() + timedelta(days=day_offset)).isoformat()
 
     for attempt in range(3):
         try:
@@ -575,7 +571,7 @@ async def fetch_all_cities(day_offset: int = 0) -> list[dict]:
             if isinstance(result, dict):
                 results.append(result)
                 unit = result.get("unit", "F")
-                logger.info(f"[Forecast] {city['name']}: {result['forecast_high_f']}°{unit} (σ={result['sigma']})")
+                logger.info(f"[Forecast] {city['name']}: {result['forecast_high']}°{unit} (σ={result['sigma']})")
             else:
                 logger.warning(f"[Forecast] {city['name']}: failed — {result}")
     return results

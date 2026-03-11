@@ -368,7 +368,7 @@ async def build_market_map(cities: list, thresholds: list) -> dict:
             buckets = []
             total_volume = 0.0
             market_id = event.get("id", "")
-            end_date = event.get("endDate", "")
+            # Re-use already-validated end_date from line above — don't re-fetch with different fallback
 
             for nm in nested_markets:
                 bucket_label = nm.get("groupItemTitle") or nm.get("question") or nm.get("title") or ""

@@ -66,7 +66,7 @@ def evaluate_signal(
     is_early_window: bool = False,
     # Re-entry
     entry_number: int = 1,
-    prior_entry_ev: float = None,
+    prior_entry_edge: float = None,
     crowd_price_at_prior: float = None,
 ) -> tuple[bool, str, dict]:
     """
@@ -166,13 +166,13 @@ def evaluate_signal(
                     f"— no material repricing"
                 ), {}
 
-        # EV must beat prior high-water mark
-        if prior_entry_ev is not None:
-            hwm = min(prior_entry_ev, cfg["reentry_ev_hwm_cap"])
-            if edge < hwm + cfg["reentry_min_ev_improvement"]:
+        # Edge must beat prior high-water mark (this is raw edge comparison, not true EV)
+        if prior_entry_edge is not None:
+            hwm = min(prior_entry_edge, cfg["reentry_edge_hwm_cap"])
+            if edge < hwm + cfg["reentry_min_edge_improvement"]:
                 return False, (
                     f"Re-entry: edge {edge:.1%} doesn't beat HWM {hwm:.1%} + "
-                    f"premium {cfg['reentry_min_ev_improvement']:.1%}"
+                    f"premium {cfg['reentry_min_edge_improvement']:.1%}"
                 ), {}
 
         # Cap re-entries
@@ -269,22 +269,17 @@ async def open_paper_trade(
     edge = abs(noaa_prob - market_data["yes_price"])
     unit = noaa_data.get("unit", "F")
 
-    # Extract market_date from end_date (e.g. "2026-03-11T23:00:00Z" -> "2026-03-11")
-    raw_end = market_data.get("end_date", "") or ""
-    market_date_str = raw_end[:10] if len(raw_end) >= 10 else None
-
     trade = Trade(
         city=city,
         station_id=station_id,
         threshold_f=threshold,
         direction=direction,
         market_condition=f"High >= {threshold}{unit}",
-        market_date=market_date_str,
         polymarket_market_id=market_data.get("market_id"),
         polymarket_token_id=market_data.get("token_id"),
         market_yes_price=market_data["yes_price"],
         market_volume=market_data["volume"],
-        noaa_forecast_high=noaa_data["forecast_high_f"],
+        noaa_forecast_high=noaa_data["forecast_high"],
         noaa_sigma=noaa_data["sigma"],
         noaa_true_prob=noaa_prob,
         noaa_condition=noaa_data.get("condition"),
@@ -303,8 +298,9 @@ async def open_paper_trade(
         models_agreed=sizing.get("models_agreed"),
         early_window=sizing.get("early_window", False),
         entry_number=sizing.get("entry_number", 1),
-        prior_entry_ev=noaa_data.get("prior_entry_ev"),
+        prior_entry_edge=noaa_data.get("prior_entry_edge"),
         crowd_price_at_prior=noaa_data.get("crowd_price_at_prior"),
+        market_date=noaa_data.get("market_date"),
     )
     session.add(trade)
 
@@ -360,7 +356,9 @@ async def settle_trade(
 
     await session.flush()
 
-    unit = "C" if trade.threshold_f < 50 and trade.threshold_f == int(trade.threshold_f) else "F"
+    # Derive unit from market_condition field (set at trade open as "High >= {threshold}{unit}")
+    # This is reliable for any temperature range — no threshold-range hacks needed.
+    unit = "C" if str(trade.market_condition or "").endswith("C") else "F"
     logger.info(
         f"[SETTLE] {trade.city} >={trade.threshold_f}{unit} {trade.direction} | "
         f"Actual={actual_high_f}{unit} | {status} | Net P&L=${net_pnl:+.2f} | "
@@ -377,12 +375,15 @@ async def log_calibration(
     forecast_high: float,
     actual_high: Optional[float],
     sigma: float,
+    market_date: str = None,
 ):
-    today = date.today().isoformat()
+    # Use the actual market date being settled, not today's date.
+    # Falling back to today only if market_date is somehow missing.
+    cal_date = market_date or date.today().isoformat()
     existing = await session.execute(
         select(CityCalibration).where(
             CityCalibration.city == city,
-            CityCalibration.date == today,
+            CityCalibration.date == cal_date,
         )
     )
     if existing.scalar_one_or_none():
@@ -392,8 +393,8 @@ async def log_calibration(
     cal = CityCalibration(
         city=city,
         station_id=station_id,
-        date=today,
-        forecast_high_f=forecast_high,
+        date=cal_date,
+        forecast_high=forecast_high,
         actual_high_f=actual_high,
         forecast_error_f=error,
         sigma_used=sigma,

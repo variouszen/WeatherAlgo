@@ -120,6 +120,7 @@ async def reset_bankroll_endpoint():
 
 
 
+@app.post("/api/admin/reset-daily-loss")
 async def reset_daily_loss_endpoint():
     """Force-reset the daily loss counter. Use when counter is stuck."""
     async with AsyncSessionLocal() as session:
@@ -166,35 +167,16 @@ async def purge_all_open_trades():
         "bankroll_after": bankroll_state.balance,
         "purged_trades": purged,
     }
+@app.post("/api/admin/purge-stale-trades")
 async def purge_stale_trades():
     """
-    Delete open trades that were entered against expired/stale Polymarket markets.
-    A trade is stale if its market_condition references a date before today.
-    Also refunds the position size back to bankroll.
+    Delete open trades whose market_date is before today.
+    Uses trade.market_date directly — no title/condition parsing.
+    Also refunds position size back to bankroll.
     """
-    from datetime import datetime, timezone, timedelta
-    import re
+    from datetime import datetime, timezone
 
     today = datetime.now(timezone.utc).date()
-
-    def extract_date_from_condition(condition: str):
-        """Parse date from market_condition or polymarket title."""
-        if not condition:
-            return None
-        m = re.search(
-            r'\b(january|february|march|april|may|june|july|august|'
-            r'september|october|november|december)\s+(\d{1,2})\b',
-            condition.lower()
-        )
-        if m:
-            try:
-                year = datetime.now(timezone.utc).year
-                dt = datetime.strptime(f"{m.group(1)} {m.group(2)} {year}", "%B %d %Y")
-                return dt.date()
-            except ValueError:
-                pass
-        return None
-
     purged = []
     kept = []
 
@@ -208,27 +190,26 @@ async def purge_stale_trades():
             open_trades = result.scalars().all()
 
             for trade in open_trades:
-                # Check opened_at date — trades opened before today are candidates
-                trade_open_date = trade.opened_at.date() if trade.opened_at else None
-
-                # Also check if the market_condition has an explicit old date
-                condition_date = extract_date_from_condition(trade.market_condition or "")
-
+                # Primary: use market_date field (the actual date being bet on)
                 is_stale = False
                 reason = ""
 
-                if condition_date and condition_date < today:
-                    is_stale = True
-                    reason = f"market_condition date {condition_date} < today {today}"
-                elif trade_open_date and trade_open_date < today:
-                    # Opened before today — check if it has a valid today/tomorrow market
-                    # For safety, flag trades opened more than 1 day ago
-                    if trade_open_date < today - timedelta(days=1):
+                if trade.market_date:
+                    try:
+                        mkt_date = datetime.strptime(trade.market_date, "%Y-%m-%d").date()
+                        if mkt_date < today:
+                            is_stale = True
+                            reason = f"market_date {mkt_date} < today {today}"
+                    except Exception:
+                        pass
+
+                # Fallback: if market_date missing, use opened_at
+                if not is_stale and not trade.market_date:
+                    if trade.opened_at and trade.opened_at.date() < today:
                         is_stale = True
-                        reason = f"opened {trade_open_date}, more than 1 day old"
+                        reason = f"no market_date, opened_at {trade.opened_at.date()} < today {today}"
 
                 if is_stale:
-                    # Refund position size to bankroll
                     bankroll_state.balance = round(
                         bankroll_state.balance + trade.position_size_usd, 2
                     )
@@ -242,8 +223,7 @@ async def purge_stale_trades():
                     })
                     await session.delete(trade)
                     logger.info(
-                        f"[PURGE] Deleted stale trade: {trade.city} "
-                        f">={trade.threshold_f} {trade.direction} | "
+                        f"[PURGE-STALE] {trade.city} >={trade.threshold_f} {trade.direction} | "
                         f"${trade.position_size_usd} refunded | {reason}"
                     )
                 else:
@@ -424,7 +404,7 @@ async def get_calibration(city: str = None, limit: int = 60):
             {
                 "city": r.city,
                 "date": r.date,
-                "forecast_high_f": r.forecast_high_f,
+                "forecast_high": r.forecast_high,
                 "actual_high_f": r.actual_high_f,
                 "forecast_error_f": r.forecast_error_f,
                 "sigma_used": r.sigma_used,

@@ -60,10 +60,10 @@ BOT_CONFIG = {
     "reentry_enabled": True,
     "reentry_min_edge_premium": 0.04,       # re-entry needs min_edge + this (so 12% default)
     "reentry_min_crowd_move": 0.08,         # crowd price must have moved by this much
-    "reentry_min_ev_improvement": 0.03,     # EV must beat prior high-water mark by this
+    "reentry_min_edge_improvement": 0.03,   # edge must beat prior high-water mark by this
     "reentry_cooldown_minutes": 45,         # minimum wait between entries on same city
     "reentry_max_per_city": 2,              # max re-entries (total 3 trades per city per day)
-    "reentry_ev_hwm_cap": 0.85,             # cap high-water mark at 85% so blowouts don't block
+    "reentry_edge_hwm_cap": 0.85,           # cap edge high-water mark at 85% so blowouts don't block
     "reentry_no_late_entry_hours": 3,       # no re-entry within 3h of market close
 
     # --- Position sizing ---
