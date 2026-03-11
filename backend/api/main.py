@@ -121,7 +121,6 @@ async def reset_bankroll_endpoint():
     }
 
 
-
 @app.post("/api/admin/reset-daily-loss")
 async def reset_daily_loss_endpoint():
     """Force-reset the daily loss counter. Use when counter is stuck."""
@@ -169,6 +168,8 @@ async def purge_all_open_trades():
         "bankroll_after": bankroll_state.balance,
         "purged_trades": purged,
     }
+
+
 @app.post("/api/admin/purge-stale-trades")
 async def purge_stale_trades():
     """
@@ -238,6 +239,50 @@ async def purge_stale_trades():
         "bankroll_after": bankroll_state.balance,
         "purged_trades": purged,
         "kept_trades": kept,
+    }
+
+
+@app.post("/api/admin/delete-trades")
+async def delete_specific_trades():
+    """
+    One-time cleanup — delete specific bad trades by ID and refund bankroll.
+    Hardcoded to IDs: 78, 80, 81, 82, 83
+    """
+    trade_ids = [78, 80, 81, 82, 83]
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            bankroll_state = await get_bankroll(session)
+            result = await session.execute(
+                select(Trade).where(Trade.id.in_(trade_ids))
+            )
+            trades = result.scalars().all()
+            refunded = 0.0
+            deleted = []
+            for trade in trades:
+                if trade.status == "OPEN":
+                    bankroll_state.balance = round(
+                        bankroll_state.balance + trade.position_size_usd, 2
+                    )
+                    refunded += trade.position_size_usd
+                deleted.append({
+                    "id": trade.id,
+                    "city": trade.city,
+                    "threshold": trade.threshold_f,
+                    "direction": trade.direction,
+                    "size": trade.position_size_usd,
+                })
+                await session.delete(trade)
+                logger.info(
+                    f"[DELETE-TRADE] #{trade.id} {trade.city} >={trade.threshold_f} "
+                    f"{trade.direction} | ${trade.position_size_usd} refunded"
+                )
+
+    return {
+        "status": "done",
+        "deleted_count": len(deleted),
+        "refunded": round(refunded, 2),
+        "bankroll_after": bankroll_state.balance,
+        "deleted_trades": deleted,
     }
 
 
@@ -448,7 +493,7 @@ def _trade_to_dict(t: Trade) -> dict:
         "threshold_f": t.threshold_f,
         "direction": t.direction,
         "market_condition": t.market_condition,
-        "market_date": t.market_date,          # e.g. "2026-03-11" — the day being bet on
+        "market_date": t.market_date,
         "market_yes_price": t.market_yes_price,
         "market_volume": t.market_volume,
         "noaa_forecast_high": t.noaa_forecast_high,
@@ -521,7 +566,6 @@ async def bucket_mapping_summary():
     async with AsyncSessionLocal() as session:
         now_utc = datetime.now(timezone.utc)
         today_str = now_utc.date().isoformat()
-        # Use datetime range instead of func.date() — avoids asyncpg type error
         day_start = datetime(now_utc.year, now_utc.month, now_utc.day, tzinfo=timezone.utc)
 
         result = await session.execute(
