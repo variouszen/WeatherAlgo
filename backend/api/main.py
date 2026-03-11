@@ -609,23 +609,33 @@ async def bucket_mapping_detail(limit: int = 100):
 @app.get("/api/debug/markets")
 async def debug_markets():
     """
-    Test the slug-based event discovery path for today's markets.
-    Shows exactly what build_market_map would find for each city.
-    Replaces the old tag-based endpoint which returned junk like BitBoy markets.
+    Test the slug-based event discovery path — mirrors MAX_FORWARD_DAYS logic.
+    Tries today, +1, +2 for each city and reports the first valid event found.
+    Shows exactly what build_market_map would find.
     """
-    from data.polymarket import build_slug, fetch_event_by_slug, CITY_SLUGS
-    from datetime import timezone
+    from data.polymarket import build_slug, fetch_event_by_slug, CITY_SLUGS, MAX_FORWARD_DAYS
+    from datetime import timezone, timedelta
 
     utc_today = datetime.now(timezone.utc).date()
     results = {}
 
     async with httpx.AsyncClient() as client:
         for city in CITY_SLUGS:
-            slug = build_slug(city, utc_today)
-            event, rejection = await fetch_event_by_slug(city, utc_today, client)
+            event = None
+            slug = None
+            rejection = f"No valid event in next {MAX_FORWARD_DAYS} days"
+            found_date = None
+
+            for day_offset in range(MAX_FORWARD_DAYS):
+                target_date = utc_today + timedelta(days=day_offset)
+                slug = build_slug(city, target_date)
+                event, rejection = await fetch_event_by_slug(city, target_date, client)
+                if event:
+                    found_date = target_date.isoformat()
+                    break
+
             if event:
                 markets = event.get("markets", [])
-                # Sample first 3 buckets so response stays readable
                 sample_buckets = [
                     {
                         "label": m.get("groupItemTitle") or m.get("question", ""),
@@ -635,6 +645,7 @@ async def debug_markets():
                 ]
                 results[city] = {
                     "status": "found",
+                    "market_date": found_date,
                     "slug": slug,
                     "title": event.get("title", ""),
                     "endDate": event.get("endDate") or event.get("end_date"),
@@ -652,7 +663,7 @@ async def debug_markets():
 
     found = sum(1 for v in results.values() if v["status"] == "found")
     return {
-        "date_checked": utc_today.isoformat(),
+        "utc_now": datetime.now(timezone.utc).isoformat(),
         "cities_found": found,
         "cities_checked": len(CITY_SLUGS),
         "results": results,
