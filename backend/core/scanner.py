@@ -382,6 +382,7 @@ async def run_scan() -> dict:
                         threshold=threshold,
                         noaa_prob=noaa_prob,
                         market_yes_price=yes_price,
+                        volume=market_data["volume"],
                         confidence=f["confidence"],
                         direction=direction,
                         bankroll=bankroll_state.balance,
