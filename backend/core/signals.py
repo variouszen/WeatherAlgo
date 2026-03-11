@@ -76,7 +76,7 @@ def evaluate_signal(
     1. Directional gate — forecast must agree with trade direction
     2. Buffer filter — forecast must clear threshold by min margin
     Then confidence/sizing modifiers:
-    3. Core filters — edge, confidence, volume, price bounds, crowd conviction
+    3. Core filters — edge, confidence, price bounds, crowd conviction
     3. Multi-model consensus — affects sizing, not a hard veto unless all disagree
     4. Early window boost — slightly relaxes confidence, boosts sizing
     5. Re-entry rules — escalating EV requirement, cooldown, crowd move check
