@@ -515,18 +515,18 @@ async def bucket_mapping_summary():
     """
     Daily summary of bucket mapping diagnostics.
     Returns counts by match type, avg prob gap, and top 10 mismatches.
-    Compact enough to paste into a chat for analysis.
     """
-    from datetime import timedelta
-    from sqlalchemy import cast, Date as SADate
+    from datetime import timezone
 
     async with AsyncSessionLocal() as session:
-        today_str = datetime.utcnow().date().isoformat()
+        now_utc = datetime.now(timezone.utc)
+        today_str = now_utc.date().isoformat()
+        # Use datetime range instead of func.date() — avoids asyncpg type error
+        day_start = datetime(now_utc.year, now_utc.month, now_utc.day, tzinfo=timezone.utc)
 
-        # All rows from today
         result = await session.execute(
             select(BucketMappingDiagnostic)
-            .where(func.date(BucketMappingDiagnostic.scanned_at) == today_str)
+            .where(BucketMappingDiagnostic.scanned_at >= day_start)
             .order_by(desc(BucketMappingDiagnostic.scanned_at))
         )
         rows = result.scalars().all()
@@ -608,44 +608,52 @@ async def bucket_mapping_detail(limit: int = 100):
 
 @app.get("/api/debug/markets")
 async def debug_markets():
-    """Fetch raw Gamma API events to inspect temperature market structure."""
+    """
+    Test the slug-based event discovery path for today's markets.
+    Shows exactly what build_market_map would find for each city.
+    Replaces the old tag-based endpoint which returned junk like BitBoy markets.
+    """
+    from data.polymarket import build_slug, fetch_event_by_slug, CITY_SLUGS
+    from datetime import timezone
+
+    utc_today = datetime.now(timezone.utc).date()
     results = {}
+
     async with httpx.AsyncClient() as client:
-        # Check events endpoint
-        for tag in ["daily-temperature", "weather"]:
-            try:
-                r = await client.get(
-                    "https://gamma-api.polymarket.com/events",
-                    params={"active": "true", "closed": "false", "tag_slug": tag, "limit": 2},
-                    headers={"User-Agent": "WeatherArbBot/1.0", "Accept": "application/json"},
-                    timeout=15.0,
-                )
-                data = r.json()
-                events = data if isinstance(data, list) else data.get("events", [])
-                results[f"events_tag_{tag}"] = {
-                    "status": r.status_code,
-                    "count": len(events),
-                    "sample": events[:1]
+        for city in CITY_SLUGS:
+            slug = build_slug(city, utc_today)
+            event, rejection = await fetch_event_by_slug(city, utc_today, client)
+            if event:
+                markets = event.get("markets", [])
+                # Sample first 3 buckets so response stays readable
+                sample_buckets = [
+                    {
+                        "label": m.get("groupItemTitle") or m.get("question", ""),
+                        "outcomePrices": m.get("outcomePrices"),
+                    }
+                    for m in markets[:3]
+                ]
+                results[city] = {
+                    "status": "found",
+                    "slug": slug,
+                    "title": event.get("title", ""),
+                    "endDate": event.get("endDate") or event.get("end_date"),
+                    "active": event.get("active"),
+                    "closed": event.get("closed"),
+                    "bucket_count": len(markets),
+                    "sample_buckets": sample_buckets,
                 }
-            except Exception as e:
-                results[f"events_tag_{tag}"] = {"error": str(e)}
+            else:
+                results[city] = {
+                    "status": "not_found",
+                    "slug": slug,
+                    "rejection": rejection,
+                }
 
-        # Also check raw markets with daily-temperature tag
-        try:
-            r = await client.get(
-                "https://gamma-api.polymarket.com/markets",
-                params={"active": "true", "closed": "false", "tag_slug": "daily-temperature", "limit": 2},
-                headers={"User-Agent": "WeatherArbBot/1.0", "Accept": "application/json"},
-                timeout=15.0,
-            )
-            data = r.json()
-            markets = data if isinstance(data, list) else data.get("markets", [])
-            results["markets_tag_daily_temperature"] = {
-                "status": r.status_code,
-                "count": len(markets),
-                "sample": markets[:1]
-            }
-        except Exception as e:
-            results["markets_tag_daily_temperature"] = {"error": str(e)}
-
-    return results
+    found = sum(1 for v in results.values() if v["status"] == "found")
+    return {
+        "date_checked": utc_today.isoformat(),
+        "cities_found": found,
+        "cities_checked": len(CITY_SLUGS),
+        "results": results,
+    }

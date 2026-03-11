@@ -172,33 +172,25 @@ async def run_scan() -> dict:
             # per city and can fetch forecasts for the right day.
             log("Fetching Polymarket prices...")
             try:
-                market_map = await build_market_map(city_names, TEMP_THRESHOLDS_F + TEMP_THRESHOLDS_C)
-                log(f"Polymarket: {len(market_map)} city/threshold markets")
+                market_map, city_date_map = await build_market_map(city_names, TEMP_THRESHOLDS_F + TEMP_THRESHOLDS_C)
+                log(f"Polymarket: {len(market_map)} direct city/date/threshold entries across {len(city_date_map)} cities")
             except Exception as e:
                 log(f"Polymarket fetch failed: {e}", "WARN")
                 scan_result["errors"].append(f"Polymarket: {e}")
                 market_map = {}
 
-            # Derive per-city day_offset from the market end_dates.
-            # A city can have markets for today AND tomorrow — use the earliest
-            # future resolve date as the target offset for that city's forecast.
+            # Derive per-city day_offset from city_date_map returned by build_market_map.
+            # city_date_map already tells us exactly which date was selected per city.
+            # Fall back to computing from end_date only if city_date_map is missing an entry.
             utc_today = datetime.now(timezone.utc).date()
             city_day_offset: dict[str, int] = {}
-            for (city_name, _threshold), mkt_data in market_map.items():
-                end_date_str = mkt_data.get("end_date", "")
-                if not end_date_str:
-                    continue
+            for city_name, date_str in city_date_map.items():
                 try:
-                    mkt_date = datetime.fromisoformat(
-                        str(end_date_str).replace("Z", "+00:00")
-                    ).date() if "T" in str(end_date_str) else datetime.strptime(str(end_date_str)[:10], "%Y-%m-%d").date()
-                    offset = (mkt_date - utc_today).days
-                    offset = max(0, min(offset, 6))  # clamp to 0-6
-                    # Keep the smallest valid offset for this city (soonest market)
-                    if city_name not in city_day_offset or offset < city_day_offset[city_name]:
-                        city_day_offset[city_name] = offset
+                    mkt_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                    offset = max(0, min((mkt_date - utc_today).days, 6))
+                    city_day_offset[city_name] = offset
                 except Exception:
-                    pass
+                    city_day_offset[city_name] = 0
 
             log(f"City day offsets: { {k: v for k, v in city_day_offset.items()} }")
 
@@ -319,7 +311,12 @@ async def run_scan() -> dict:
                 ecmwf_forecast = validators.get("ecmwf")
 
                 for threshold in thresholds_for_city:
-                    mkt_key = (city, threshold)
+                    # Look up using 3-tuple key — city + exact market date + threshold.
+                    # city_date_map tells us which date was selected for this city.
+                    city_market_date = city_date_map.get(city)
+                    if city_market_date is None:
+                        break   # no market at all for this city — skip all thresholds
+                    mkt_key = (city, city_market_date, threshold)
                     if mkt_key not in market_map:
                         continue
 
@@ -331,9 +328,8 @@ async def run_scan() -> dict:
                     end_date_str = market_data.get("end_date", "")
                     is_early = _is_early_window(end_date_str)
 
-                    # Derive market_date from end_date — used for reentry keying and trade.market_date
-                    # This ensures reentry is keyed per city+market-date, not city+today
-                    market_date_str = end_date_str[:10] if end_date_str else datetime.now(timezone.utc).date().isoformat()
+                    # market_date_str is now authoritative from city_date_map — no parsing needed
+                    market_date_str = city_market_date
 
                     # Re-entry state from DB keyed by city + actual market date
                     reentry = await _get_reentry_state_from_db(session, city, market_date_str)

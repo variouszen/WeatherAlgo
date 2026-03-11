@@ -1,21 +1,27 @@
 # backend/data/polymarket.py
 """
-Polymarket temperature market fetcher.
+Polymarket temperature market fetcher — v3 (slug-based, date-keyed, direct-threshold only).
 
-Temperature markets on Polymarket are structured as EVENTS with multiple
-outcome markets (buckets). Each event like "Highest temperature in NYC on March 9?"
-contains outcomes like "46-47°F", "48-49°F", "52°F or higher".
+Four key design decisions vs v2:
+  1. Key is (city, market_date_str, threshold) — prevents today/tomorrow collision.
+  2. Only thresholds that directly align with a real bucket lower-bound are populated.
+     No synthetic interpolation across unsupported thresholds ever fires a signal.
+  3. The kill-switch is per-bucket (skip that bucket) not per-event.
+     Legitimate tail buckets can be cheap; skip the bucket, not the whole event.
+  4. build_market_map() returns (market_map, city_date_map) so scanner knows which
+     market_date was selected per city without scanning keys.
 
-The correct API approach is to query the /events endpoint with tag filtering,
-then extract the nested markets (outcomes) from each event.
+No tag-based fallback. If slug fetch fails or validation fails → city/date skipped entirely.
 """
 
 import httpx
 import re
+import json
 import logging
 from typing import Optional
-from datetime import datetime, timezone, timedelta
-import sys, os
+from datetime import datetime, date, timezone, timedelta
+import sys
+import os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import GAMMA_API_BASE, CLOB_API_BASE, USER_AGENT
@@ -27,199 +33,185 @@ HEADERS = {
     "Accept": "application/json",
 }
 
-CITY_ALIASES = {
-    "New York":      ["new york", "nyc", "new york city"],
-    "Chicago":       ["chicago"],
-    "Seattle":       ["seattle"],
-    "Atlanta":       ["atlanta"],
-    "Dallas":        ["dallas"],
-    "Miami":         ["miami"],
-    "Boston":        ["boston"],
-    "Philadelphia":  ["philadelphia", "philly"],
-    "London":        ["london"],
-    "Seoul":         ["seoul"],
-    "Paris":         ["paris"],
-    "Toronto":       ["toronto"],
+# ── City → Polymarket slug token ──────────────────────────────────────────────
+CITY_SLUGS: dict[str, str] = {
+    "New York":     "nyc",
+    "Chicago":      "chicago",
+    "Seattle":      "seattle",
+    "Atlanta":      "atlanta",
+    "Dallas":       "dallas",
+    "Miami":        "miami",
+    "Boston":       "boston",
+    "Philadelphia": "philadelphia",
+    "London":       "london",
+    "Seoul":        "seoul",
+    "Paris":        "paris",
+    "Toronto":      "toronto",
 }
 
-CITY_CELSIUS = {"London", "Seoul", "Paris", "Toronto"}
+CITY_TITLE_TOKENS: dict[str, list[str]] = {
+    "New York":     ["nyc", "new york"],
+    "Chicago":      ["chicago"],
+    "Seattle":      ["seattle"],
+    "Atlanta":      ["atlanta"],
+    "Dallas":       ["dallas"],
+    "Miami":        ["miami"],
+    "Boston":       ["boston"],
+    "Philadelphia": ["philadelphia", "philly"],
+    "London":       ["london"],
+    "Seoul":        ["seoul"],
+    "Paris":        ["paris"],
+    "Toronto":      ["toronto"],
+}
 
-# Slippage haircut: assume you get 2% worse than displayed midpoint
-# Makes paper trading closer to live reality on thin markets
+CITY_CELSIUS: set[str] = {"London", "Seoul", "Paris", "Toronto"}
+
 SLIPPAGE_HAIRCUT = 0.02
-
-# Minimum number of valid buckets required to trust reconstruction
 MIN_VALID_BUCKETS = 3
-
-# Minimum total price mass for a bucket set to be considered liquid
 MIN_PRICE_MASS = 0.50
+MIN_BUCKET_PRICE = 0.02   # per-bucket floor — skip bucket, not event
+MAX_FORWARD_DAYS = 3      # try today, +1, +2
 
 
-async def fetch_temperature_events(client: httpx.AsyncClient) -> list:
+# ── Slug construction ─────────────────────────────────────────────────────────
+
+def build_slug(city: str, target_date: date) -> Optional[str]:
     """
-    Fetch temperature events from Gamma API /events endpoint.
+    "New York" + 2026-03-11  →  "highest-temperature-in-nyc-on-march-11-2026"
+    Returns None if city has no slug mapping.
     """
-    all_events = []
-    seen_ids = set()
+    city_slug = CITY_SLUGS.get(city)
+    if not city_slug:
+        return None
+    month = target_date.strftime("%B").lower()
+    day   = target_date.day
+    year  = target_date.year
+    return f"highest-temperature-in-{city_slug}-on-{month}-{day}-{year}"
 
-    queries = [
-        {"tag_slug": "daily-temperature", "limit": 200},
-        {"tag_slug": "weather", "limit": 200},
-        {"tag": "temperature", "limit": 200},
-    ]
 
-    for params in queries:
-        try:
-            r = await client.get(
-                f"{GAMMA_API_BASE}/events",
-                params={"active": "true", "closed": "false", **params},
-                headers=HEADERS,
-                timeout=15.0,
-            )
-            if r.status_code != 200:
-                logger.warning(f"[POLY] Events query {params} → HTTP {r.status_code}")
-                continue
-            data = r.json()
-            events = data if isinstance(data, list) else data.get("events", [])
-            new = [e for e in events if e.get("id") not in seen_ids and _is_temp_event(e)]
-            all_events.extend(new)
-            seen_ids.update(e.get("id") for e in new)
-            logger.info(f"[POLY] Events query {params} → {len(events)} total, {len(new)} temp events new")
-        except Exception as e:
-            logger.warning(f"[POLY] Events query {params} failed: {e}")
+# ── Event fetch + strict validation ──────────────────────────────────────────
 
-    # Also try markets endpoint directly
+async def fetch_event_by_slug(
+    city: str,
+    target_date: date,
+    client: httpx.AsyncClient,
+) -> tuple[Optional[dict], str]:
+    """
+    Fetch and fully validate the Polymarket temperature event for city + target_date.
+    Returns (event_dict, "") on success; (None, reason) on failure.
+    Never substitutes another market.
+    """
+    slug = build_slug(city, target_date)
+    if not slug:
+        return None, f"No slug mapping for city '{city}'"
+
+    url = f"{GAMMA_API_BASE}/events/slug/{slug}"
     try:
-        r = await client.get(
-            f"{GAMMA_API_BASE}/markets",
-            params={"active": "true", "closed": "false", "tag_slug": "daily-temperature", "limit": 200},
-            headers=HEADERS,
-            timeout=15.0,
-        )
-        if r.status_code == 200:
-            data = r.json()
-            markets = data if isinstance(data, list) else data.get("markets", [])
-            logger.info(f"[POLY] Direct markets tag=daily-temperature → {len(markets)} markets")
-            for m in markets:
-                title = m.get("question") or m.get("groupItemTitle") or ""
-                if _is_temp_title(title):
-                    all_events.append({"_raw_market": True, **m})
+        r = await client.get(url, headers=HEADERS, timeout=15.0)
     except Exception as e:
-        logger.warning(f"[POLY] Direct markets fetch failed: {e}")
+        return None, f"HTTP request failed: {e}"
 
-    logger.info(f"[POLY] Total temperature events/markets: {len(all_events)}")
-    return all_events
+    if r.status_code == 404:
+        return None, f"Slug not found (404): {slug}"
+    if r.status_code != 200:
+        return None, f"HTTP {r.status_code} for slug: {slug}"
+
+    try:
+        event = r.json()
+        if isinstance(event, list):
+            event = event[0] if event else {}
+    except Exception as e:
+        return None, f"JSON parse error: {e}"
+
+    if not isinstance(event, dict) or not event:
+        return None, f"Empty or malformed response for slug: {slug}"
+
+    ok, reason = _validate_event(event, city, target_date)
+    if not ok:
+        return None, reason
+
+    return event, ""
 
 
-def _is_temp_event(event: dict) -> bool:
-    title = (event.get("title") or event.get("question") or "").lower()
-    return _is_temp_title(title)
-
-
-def _is_temp_title(title: str) -> bool:
-    tl = title.lower()
-    return ("highest temperature" in tl or "daily temperature" in tl or "high temp" in tl)
-
-
-def extract_market_date(title: str) -> Optional[datetime.date]:
+def _validate_event(event: dict, city: str, target_date: date) -> tuple[bool, str]:
     """
-    Extract date from market title like 'Highest temperature in NYC on March 9?'
+    All gates must pass — any failure rejects the event entirely.
     """
-    m = re.search(
-        r'\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})\b',
-        title.lower()
-    )
-    if m:
-        month_str, day_str = m.group(1), m.group(2)
-        try:
-            year = datetime.now(timezone.utc).year
-            dt = datetime.strptime(f"{month_str} {day_str} {year}", "%B %d %Y")
-            return dt.date()
-        except ValueError:
-            pass
-    return None
+    title       = (event.get("title") or "").strip()
+    title_lower = title.lower()
 
+    # 1. Title must reference the city
+    city_tokens = CITY_TITLE_TOKENS.get(city, [city.lower()])
+    if not any(tok in title_lower for tok in city_tokens):
+        return False, f"Title '{title[:60]}' does not mention city '{city}'"
 
-def is_valid_market_date(title: str, end_date: str = None) -> bool:
-    """
-    Return True only if market is still valid to enter.
+    # 2. Title must be a temperature market
+    if "temperature" not in title_lower:
+        return False, f"Title '{title[:60]}' is not a temperature market"
 
-    Priority:
-    1. If endDate exists: use it as the hard filter
-       - Reject if already past
-       - Reject if within 3 hours of closing (too late to enter)
-    2. If endDate missing/malformed: fall back to title date parsing
-    3. If both exist: log a warning if they disagree by more than 1 day
-    """
+    # 3. Active and not closed
+    if not event.get("active", False):
+        return False, "Event is not active"
+    if event.get("closed", True):
+        return False, "Event is closed"
+
+    # 4. endDate: must exist, parseable, not expired, not closing < 3h, match target_date
+    end_date_raw = event.get("endDate") or event.get("end_date")
+    if not end_date_raw:
+        return False, "Event has no endDate"
+
+    try:
+        end_date_str = str(end_date_raw).strip()
+        if "T" in end_date_str:
+            end_dt = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
+        else:
+            parts = end_date_str[:10].split("-")
+            end_dt = datetime(
+                int(parts[0]), int(parts[1]), int(parts[2]),
+                23, 59, 59, tzinfo=timezone.utc,
+            )
+    except Exception as e:
+        return False, f"Cannot parse endDate '{end_date_raw}': {e}"
+
     now_utc = datetime.now(timezone.utc)
-    today = now_utc.date()
-    min_entry_cutoff = now_utc + timedelta(hours=3)
+    if end_dt <= now_utc:
+        return False, f"Event already closed (endDate={end_date_raw})"
 
-    # Primary: endDate from Polymarket
-    if end_date:
-        try:
-            end_date_str = str(end_date).strip()
-            if "T" in end_date_str:
-                end_dt = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
-            else:
-                end_dt = datetime(
-                    *[int(x) for x in end_date_str[:10].split("-")],
-                    23, 59, 59, tzinfo=timezone.utc
-                )
+    mins_left = (end_dt - now_utc).total_seconds() / 60
+    if mins_left < 180:
+        return False, f"Event closes too soon ({int(mins_left)}min left, need ≥180min)"
 
-            if end_dt <= now_utc:
-                logger.debug(f"[POLY] Rejecting expired market (endDate={end_date_str}): '{title[:55]}'")
-                return False
+    diff = abs((end_dt.date() - target_date).days)
+    if diff > 1:
+        return False, (
+            f"endDate {end_dt.date()} doesn't match target_date {target_date} (diff={diff}d)"
+        )
 
-            if end_dt <= min_entry_cutoff:
-                mins_left = int((end_dt - now_utc).total_seconds() // 60)
-                logger.debug(
-                    f"[POLY] Rejecting market closing too soon "
-                    f"({mins_left}min left, need 3h): '{title[:55]}'"
-                )
-                return False
+    # 5. Must have nested bucket markets
+    markets = event.get("markets", [])
+    if not markets:
+        return False, "Event has no nested markets"
 
-            # Sanity-check against title date
-            title_date = extract_market_date(title)
-            if title_date:
-                end_date_only = end_dt.date()
-                day_diff = abs((end_date_only - title_date).days)
-                if day_diff > 1:
-                    logger.warning(
-                        f"[POLY] Date mismatch: title says {title_date} but "
-                        f"endDate implies {end_date_only} (diff={day_diff}d): '{title[:55]}'"
-                    )
+    # 6. Every nested market label must parse as a temperature bucket
+    for m in markets:
+        label = (
+            m.get("groupItemTitle") or m.get("question") or m.get("title") or ""
+        ).strip()
+        if not label:
+            return False, "A nested market has an empty label"
+        if parse_bucket_range(label) is None:
+            return False, f"Nested market '{label[:50]}' is not a parseable temperature bucket"
 
-            return True
-
-        except Exception as e:
-            logger.warning(f"[POLY] Could not parse endDate '{end_date}': {e} — falling back to title")
-
-    # Fallback: title date parsing
-    market_date = extract_market_date(title)
-    if market_date is None:
-        logger.debug(f"[POLY] Could not parse date from title: '{title[:60]}'")
-        return False
-
-    max_date = today + timedelta(days=5)
-    valid = today <= market_date <= max_date
-    if not valid:
-        logger.debug(f"[POLY] Skipping stale/future market: '{title[:60]}' (date={market_date})")
-    return valid
+    return True, ""
 
 
-def match_city(title: str) -> Optional[str]:
-    tl = title.lower()
-    for city, aliases in CITY_ALIASES.items():
-        if any(alias in tl for alias in aliases):
-            return city
-    return None
-
+# ── Bucket label parser ───────────────────────────────────────────────────────
 
 def parse_bucket_range(label: str) -> Optional[tuple]:
     """
     Parse bucket outcome label into (low, high).
-    Returns (low, None) for open upper, (float('-inf'), high) for open lower.
+    Open-upper: (lo, None). Open-lower: (float('-inf'), hi). Range: (lo, hi).
+    Returns None if not parseable.
     """
     s = label.strip().lower()
 
@@ -228,14 +220,21 @@ def parse_bucket_range(label: str) -> Optional[tuple]:
     if m:
         return (float("-inf"), float(m.group(1)))
 
-    # "X or below" / "X or lower" / "X or under" / "X and below"
-    # Must come before the range pattern to avoid "49" matching as a range fragment
-    m = re.search(r"(-?\d+(?:\.\d+)?)\s*(?:°?[fc])?\s*(?:or below|or lower|or under|and below|and under)", s)
+    # "X or below" / "X or lower" / "X and below" / "X and under"
+    m = re.search(
+        r"(-?\d+(?:\.\d+)?)\s*(?:°?[fc])?\s*"
+        r"(?:or below|or lower|or under|and below|and under)",
+        s,
+    )
     if m:
         return (float("-inf"), float(m.group(1)))
 
-    # "X or higher" / "X+" / "X and above"
-    m = re.search(r"(-?\d+(?:\.\d+)?)\s*(?:°?[fc])?\s*(?:or higher|or above|and above|\+|&\s*above)", s)
+    # "X or higher" / "X+" / "X and above" / "X or above"
+    m = re.search(
+        r"(-?\d+(?:\.\d+)?)\s*(?:°?[fc])?\s*"
+        r"(?:or higher|or above|and above|\+|&\s*above)",
+        s,
+    )
     if m:
         return (float(m.group(1)), None)
 
@@ -260,19 +259,106 @@ def parse_bucket_range(label: str) -> Optional[tuple]:
     return None
 
 
+# ── Direct-threshold extraction ───────────────────────────────────────────────
+
+def get_direct_thresholds(buckets: list, candidate_thresholds: list) -> list:
+    """
+    Return only the thresholds from candidate_thresholds that exactly equal a
+    real bucket lower-bound. Everything else requires synthetic interpolation
+    and is excluded to prevent fake edges.
+
+    Example:
+        Buckets: [(-inf,56), (56,57), (57,58), (58,59), (59,None)]
+        Candidates: [55, 56, 57, 58, 59, 60, 65]
+        Returns:    [56, 57, 58, 59]
+    """
+    bucket_lower_bounds = {
+        b["low"] for b in buckets
+        if b["low"] != float("-inf")
+    }
+    return [t for t in candidate_thresholds if t in bucket_lower_bounds]
+
+
+# ── Price helpers ─────────────────────────────────────────────────────────────
+
+async def get_token_midpoint(token_id: str, client: httpx.AsyncClient) -> Optional[float]:
+    """Fetch CLOB midpoint for a token. Returns None on any failure."""
+    try:
+        r = await client.get(
+            f"{CLOB_API_BASE}/midpoint",
+            params={"token_id": token_id},
+            headers=HEADERS,
+            timeout=8.0,
+        )
+        if r.status_code == 200:
+            mid = r.json().get("mid")
+            return float(mid) if mid is not None else None
+    except Exception:
+        pass
+    return None
+
+
+def _parse_json_field(raw) -> list:
+    """Safely parse JSON string or list field."""
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except Exception:
+            pass
+    return []
+
+
+async def _extract_bucket_price(
+    nested_market: dict,
+    client: httpx.AsyncClient,
+) -> Optional[float]:
+    """
+    Get the best YES price for a bucket.
+    Priority: CLOB midpoint > outcomePrices snapshot.
+    Returns None if price is missing, invalid, or below MIN_BUCKET_PRICE.
+    Note: MIN_BUCKET_PRICE rejection skips this bucket only, not the event.
+    """
+    price = None
+
+    clob_ids = _parse_json_field(nested_market.get("clobTokenIds", "[]"))
+    if clob_ids:
+        clob_price = await get_token_midpoint(clob_ids[0], client)
+        if clob_price is not None:
+            price = clob_price
+
+    if price is None:
+        outcome_prices = _parse_json_field(nested_market.get("outcomePrices", "[]"))
+        if outcome_prices:
+            try:
+                price = float(outcome_prices[0])
+            except (ValueError, TypeError):
+                pass
+
+    if price is None or price <= 0 or price >= 1:
+        return None
+
+    if price < MIN_BUCKET_PRICE:
+        return None   # skip this bucket; caller decides if remaining buckets are still valid
+
+    return price
+
+
+# ── Bucket quality gate ───────────────────────────────────────────────────────
+
 def validate_bucket_set(buckets: list) -> tuple[bool, str]:
     """
-    Quality check before trusting a synthetic cumulative reconstruction.
+    Quality check on price-filtered bucket set.
     Returns (is_valid, reason).
     """
     if len(buckets) < MIN_VALID_BUCKETS:
-        return False, f"Only {len(buckets)} buckets (need {MIN_VALID_BUCKETS})"
+        return False, f"Only {len(buckets)} valid buckets after price filtering (need {MIN_VALID_BUCKETS})"
 
     total = sum(b["price"] for b in buckets)
     if total < MIN_PRICE_MASS:
         return False, f"Price mass {total:.2f} too low (need {MIN_PRICE_MASS})"
 
-    # Check for at least one bounded range bucket (not just open-ended)
     has_bounded = any(
         b["low"] != float("-inf") and b["high"] is not None
         for b in buckets
@@ -283,10 +369,15 @@ def validate_bucket_set(buckets: list) -> tuple[bool, str]:
     return True, "OK"
 
 
+# ── Cumulative probability ────────────────────────────────────────────────────
+
 def compute_cumulative_prob(buckets: list, threshold: float) -> Optional[float]:
     """
-    Compute P(outcome >= threshold) from Polymarket bucket prices.
-    Applies slippage haircut to the final probability to model real fill cost.
+    Compute P(outcome >= threshold) from bucket prices.
+    Called ONLY for thresholds confirmed as real bucket lower-bounds
+    (via get_direct_thresholds). The partial-bucket interpolation branch
+    only fires when the matching bucket is bounded (not open-upper), which
+    is sound because the boundary alignment is exact.
     """
     if not buckets:
         return None
@@ -298,170 +389,164 @@ def compute_cumulative_prob(buckets: list, threshold: float) -> Optional[float]:
     prob = 0.0
     for b in buckets:
         lo, hi = b["low"], b["high"]
-        p = b["price"] / total  # normalize
+        p = b["price"] / total
 
-        if hi is None:  # open upper bucket: everything above lo counts
+        if hi is None:
             if lo >= threshold:
                 prob += p
-        elif lo == float("-inf"):  # open lower bucket: nothing above threshold here
+        elif lo == float("-inf"):
             pass
         else:
             if lo >= threshold:
-                prob += p  # full bucket above threshold
-            elif hi >= threshold:
-                # Partial bucket: assume uniform distribution within range
+                prob += p
+            elif hi > threshold:
                 width = hi - lo
                 if width > 0:
                     prob += p * (hi - threshold) / width
 
-    # Apply slippage haircut: the side you're buying gets slightly worse price
-    # YES trade: prob is slightly lower than displayed (market asks more)
-    # NO trade: handled in scanner via (1 - prob)
-    # We conservatively haircut the displayed YES probability
     prob_with_slippage = prob * (1 - SLIPPAGE_HAIRCUT)
-
     return round(min(max(prob_with_slippage, 0.01), 0.99), 4)
 
 
-async def get_token_midpoint(token_id: str, client: httpx.AsyncClient) -> Optional[float]:
-    try:
-        r = await client.get(
-            f"{CLOB_API_BASE}/midpoint",
-            params={"token_id": token_id},
-            headers=HEADERS,
-            timeout=8.0,
-        )
-        if r.status_code == 200:
-            mid = r.json().get("mid")
-            return float(mid) if mid else None
-    except Exception:
-        pass
-    return None
+# ── Main entry point ──────────────────────────────────────────────────────────
 
+async def build_market_map(
+    cities: list[str],
+    thresholds: list[float],
+) -> tuple[dict, dict]:
+    """
+    Returns:
+        market_map    {(city, market_date_str, threshold): market_data}
+        city_date_map {city: market_date_str}
 
-async def build_market_map(cities: list, thresholds: list) -> dict:
+    Key uses 3-tuple to prevent date collision. Only direct-threshold entries
+    are added — no synthetic interpolation fires from this map.
+    Takes soonest valid market per city (breaks after first success).
     """
-    Build {(city, threshold): market_data} from Polymarket temperature events.
-    """
+    utc_today = datetime.now(timezone.utc).date()
+    market_map: dict = {}
+    city_date_map: dict[str, str] = {}
+
     async with httpx.AsyncClient() as client:
-        events = await fetch_temperature_events(client)
-
-        market_map = {}
-
-        for event in events:
-            title = event.get("title") or event.get("question") or ""
-            if not _is_temp_title(title):
-                continue
-
-            city = match_city(title)
-            if not city or city not in cities:
-                continue
-
-            end_date = event.get("endDate") or event.get("end_date_iso") or event.get("end_date")
-            if not is_valid_market_date(title, end_date=end_date):
+        for city in cities:
+            if city not in CITY_SLUGS:
+                logger.warning(f"[POLY] No slug mapping for '{city}' — skipping")
                 continue
 
             unit = "C" if city in CITY_CELSIUS else "F"
 
-            nested_markets = event.get("markets", [])
-            if event.get("_raw_market"):
-                nested_markets = [event]
+            for day_offset in range(MAX_FORWARD_DAYS):
+                target_date = utc_today + timedelta(days=day_offset)
+                event, rejection = await fetch_event_by_slug(city, target_date, client)
 
-            if not nested_markets:
-                logger.debug(f"[POLY] Event '{title[:50]}' has no nested markets")
-                continue
-
-            buckets = []
-            total_volume = 0.0
-            market_id = event.get("id", "")
-            # Re-use already-validated end_date from line above — don't re-fetch with different fallback
-
-            for nm in nested_markets:
-                bucket_label = nm.get("groupItemTitle") or nm.get("question") or nm.get("title") or ""
-                if not bucket_label:
+                if event is None:
+                    logger.info(f"[POLY] SKIP {city}/{target_date} | {rejection}")
                     continue
 
-                parsed = parse_bucket_range(bucket_label)
-                if parsed is None:
-                    logger.debug(f"[POLY] Unparseable bucket: '{bucket_label}'")
+                title           = event.get("title", "").strip()
+                end_date        = event.get("endDate") or event.get("end_date")
+                event_id        = str(event.get("id", ""))
+                slug            = build_slug(city, target_date)
+                market_date_str = target_date.isoformat()
+                nested_markets  = event.get("markets", [])
+
+                # ── Parse buckets ─────────────────────────────────────────────
+                buckets: list = []
+                total_volume = 0.0
+
+                for nm in nested_markets:
+                    label = (
+                        nm.get("groupItemTitle")
+                        or nm.get("question")
+                        or nm.get("title")
+                        or ""
+                    ).strip()
+                    if not label:
+                        continue
+
+                    parsed = parse_bucket_range(label)
+                    if parsed is None:
+                        logger.debug(f"[POLY] Unparseable bucket '{label}' — skip bucket")
+                        continue
+
+                    lo, hi = parsed
+                    price = await _extract_bucket_price(nm, client)
+                    if price is None:
+                        logger.debug(
+                            f"[POLY] No valid price for '{label}' ({city}/{target_date}) — skip bucket"
+                        )
+                        continue
+
+                    clob_ids = _parse_json_field(nm.get("clobTokenIds", "[]"))
+                    token_id = clob_ids[0] if clob_ids else None
+                    vol      = float(nm.get("volumeNum") or nm.get("volume") or 0)
+                    total_volume += vol
+
+                    buckets.append({
+                        "label":    label,
+                        "low":      lo,
+                        "high":     hi,
+                        "price":    price,
+                        "token_id": token_id,
+                    })
+
+                # ── Quality gate ──────────────────────────────────────────────
+                is_valid, reason = validate_bucket_set(buckets)
+                if not is_valid:
+                    logger.warning(
+                        f"[POLY] BUCKET FAIL {city}/{target_date} | {reason} | '{title[:55]}'"
+                    )
                     continue
 
-                lo, hi = parsed
-
-                # Get price from outcomePrices or CLOB
-                price = None
-                outcome_prices = nm.get("outcomePrices", "[]")
-                if isinstance(outcome_prices, str):
-                    import json
-                    try:
-                        outcome_prices = json.loads(outcome_prices)
-                    except Exception:
-                        outcome_prices = []
-
-                if outcome_prices and len(outcome_prices) > 0:
-                    try:
-                        price = float(outcome_prices[0])
-                    except (ValueError, TypeError):
-                        pass
-
-                clob_ids = nm.get("clobTokenIds", "[]")
-                if isinstance(clob_ids, str):
-                    import json
-                    try:
-                        clob_ids = json.loads(clob_ids)
-                    except Exception:
-                        clob_ids = []
-
-                if clob_ids:
-                    clob_price = await get_token_midpoint(clob_ids[0], client)
-                    if clob_price is not None:
-                        price = clob_price
-
-                if price is None or price <= 0 or price >= 1:
+                # ── Direct-threshold filtering ────────────────────────────────
+                direct_thresholds = get_direct_thresholds(buckets, thresholds)
+                if not direct_thresholds:
+                    logger.warning(
+                        f"[POLY] No direct threshold matches for {city}/{target_date} "
+                        f"| bucket bounds: "
+                        f"{sorted(b['low'] for b in buckets if b['low'] != float('-inf'))} "
+                        f"| candidates (first 8): {thresholds[:8]}"
+                    )
                     continue
 
-                vol = float(nm.get("volumeNum") or nm.get("volume") or 0)
-                total_volume += vol
+                logger.info(
+                    f"[POLY] ✓ {city}/{market_date_str} | {len(buckets)} buckets | "
+                    f"{len(direct_thresholds)} direct thresholds | "
+                    f"Vol=${total_volume:,.0f} | slug={slug}"
+                )
 
-                buckets.append({
-                    "label": bucket_label,
-                    "low": lo,
-                    "high": hi,
-                    "price": price,
-                })
+                # ── Populate market_map ───────────────────────────────────────
+                for thresh in direct_thresholds:
+                    cum_prob = compute_cumulative_prob(buckets, thresh)
+                    if cum_prob is None:
+                        continue
+                    key = (city, market_date_str, thresh)
+                    market_map[key] = {
+                        "market_id":         event_id,
+                        "event_slug":        slug,
+                        "event_title":       title,
+                        "yes_price":         cum_prob,
+                        "volume":            total_volume,
+                        "unit":              unit,
+                        "end_date":          end_date,
+                        "bucket_count":      len(buckets),
+                        "buckets":           buckets,
+                        "price_source":      "CLOB+Gamma/slug",
+                        "direct_thresholds": direct_thresholds,
+                    }
 
-            # ── Bucket quality check before using this market ─────────────────
-            is_valid, reason = validate_bucket_set(buckets)
-            if not is_valid:
-                logger.warning(f"[POLY] Skipping '{title[:50]}' — {reason}")
-                continue
+                city_date_map[city] = market_date_str
+                break   # soonest valid date wins — never try later offsets for this city
 
-            logger.info(
-                f"[POLY] Matched: {city} | {len(buckets)} buckets | "
-                f"Vol=${total_volume:,.0f} | {title[:55]}"
-            )
+            if city not in city_date_map:
+                logger.info(
+                    f"[POLY] No valid event for '{city}' in next {MAX_FORWARD_DAYS} days"
+                )
 
-            for thresh in thresholds:
-                cum_prob = compute_cumulative_prob(buckets, thresh)
-                if cum_prob is None:
-                    continue
-                key = (city, thresh)
-                if key in market_map and market_map[key]["volume"] >= total_volume:
-                    continue
-                market_map[key] = {
-                    "market_id": str(market_id),
-                    "yes_price": cum_prob,
-                    "volume": total_volume,
-                    "title": title,
-                    "buckets": buckets,
-                    "unit": unit,
-                    "price_source": "CLOB+Gamma",
-                    "end_date": end_date,
-                    "bucket_count": len(buckets),
-                }
+    logger.info(
+        f"[POLY] Market map: {len(market_map)} entries across {len(city_date_map)} cities"
+    )
+    if not market_map:
+        logger.warning("[POLY] 0 markets — verify slug patterns and threshold config")
 
-        logger.info(f"[POLY] Market map: {len(market_map)} city/threshold pairs")
-        if not market_map:
-            logger.warning("[POLY] 0 markets matched — check API structure")
-
-        return market_map
+    return market_map, city_date_map
