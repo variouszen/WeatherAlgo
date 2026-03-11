@@ -201,12 +201,35 @@ async def open_paper_trade(
     edge = abs(noaa_prob - market_data["yes_price"])
     unit = noaa_data.get("unit", "F")
 
+    # Extract the target date from the Polymarket market title
+    # e.g. "Highest temperature in NYC on March 11?" → "2026-03-11"
+    market_date_str = None
+    market_title = market_data.get("title", "")
+    if market_title:
+        import re
+        from datetime import datetime as _dt, timezone
+        m = re.search(
+            r'\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})\b',
+            market_title.lower()
+        )
+        if m:
+            try:
+                year = _dt.now(timezone.utc).year
+                parsed = _dt.strptime(f"{m.group(1)} {m.group(2)} {year}", "%B %d %Y")
+                market_date_str = parsed.date().isoformat()
+            except ValueError:
+                pass
+    # Fallback: use end_date from market_data if available
+    if not market_date_str and market_data.get("end_date"):
+        market_date_str = str(market_data["end_date"])[:10]
+
     trade = Trade(
         city=city,
         station_id=station_id,
         threshold_f=threshold,
         direction=direction,
         market_condition=f"High >= {threshold}{unit}",
+        market_date=market_date_str,
         polymarket_market_id=market_data.get("market_id"),
         polymarket_token_id=market_data.get("token_id"),
         market_yes_price=market_data["yes_price"],

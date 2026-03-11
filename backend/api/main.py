@@ -466,6 +466,7 @@ def _trade_to_dict(t: Trade) -> dict:
         "threshold_f": t.threshold_f,
         "direction": t.direction,
         "market_condition": t.market_condition,
+        "market_date": t.market_date,          # e.g. "2026-03-11" — the day being bet on
         "market_yes_price": t.market_yes_price,
         "market_volume": t.market_volume,
         "noaa_forecast_high": t.noaa_forecast_high,

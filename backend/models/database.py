@@ -42,6 +42,7 @@ class Trade(Base):
     threshold_f: Mapped[float] = mapped_column(Float)          # e.g. 68.0
     direction: Mapped[str] = mapped_column(String(5))           # YES or NO
     market_condition: Mapped[str] = mapped_column(String(100))  # "High ≥ 68°F"
+    market_date: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # "2026-03-11" — the temp date being bet on
 
     # Polymarket market data (real)
     polymarket_market_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
