@@ -77,8 +77,6 @@ def evaluate_signal(
     Then confidence/sizing modifiers:
     2. Core filters — edge, confidence, price bounds, crowd conviction
     3. Multi-model consensus — affects sizing, not a hard veto unless all disagree
-       Validators are plausibility-gated: any reading >3F / 1.7C from primary
-       is discarded as corrupt data (wrong day offset, wrong station, etc.)
     4. Early window boost — slightly relaxes confidence, boosts sizing
     5. Re-entry rules — escalating EV requirement, cooldown, crowd move check
     """
@@ -164,22 +162,7 @@ def evaluate_signal(
     consensus_factor = 1.0
     spread_note = ""
 
-    # Plausibility gate: discard any validator deviating more than 3F / 1.7C
-    # from primary. This is a data integrity check, not model disagreement tolerance.
-    # A 10F+ delta means wrong day offset, wrong station, or observed vs forecast —
-    # not a second opinion. Discarded validators don't vote, don't affect sizing,
-    # don't exist. Primary is sovereign and is never filtered.
-    if primary_forecast is not None:
-        _plaus = cfg.get("validator_plausibility_threshold_c", 1.7) if is_celsius \
-                 else cfg.get("validator_plausibility_threshold_f", 3.0)
-        _valid_validators = [
-            v for v in [gfs_forecast, ecmwf_forecast]
-            if v is not None and abs(v - primary_forecast) <= _plaus
-        ]
-    else:
-        _valid_validators = [v for v in [gfs_forecast, ecmwf_forecast] if v is not None]
-
-    all_forecasts = ([primary_forecast] if primary_forecast is not None else []) + _valid_validators
+    all_forecasts = [f for f in [primary_forecast, gfs_forecast, ecmwf_forecast] if f is not None]
 
     if len(all_forecasts) >= 2:
         # Count how many models agree on direction using prob_above, not raw comparison.
