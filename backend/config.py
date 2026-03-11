@@ -23,7 +23,7 @@ BOT_CONFIG = {
     # --- Core filters ---
     "min_edge": float(os.getenv("MIN_EDGE", "0.08")),
     "min_confidence": float(os.getenv("MIN_CONFIDENCE", "0.68")),
-    "min_market_volume": float(os.getenv("MIN_VOLUME", "50000")),
+    "min_market_volume": float(os.getenv("MIN_VOLUME", "35000")),
 
     # --- Multi-source consensus (NEW v2) ---
     # Both NOAA and Open-Meteo must agree on direction
@@ -74,6 +74,7 @@ CITIES = [
     {"name": "Philadelphia",  "lat": 39.9526,  "lon": -75.1652,  "station": "KPHL", "emoji": "🔔",  "celsius": False, "timezone": "America/New_York"},
     {"name": "London",        "lat": 51.5033,  "lon": 0.0550,    "station": "EGLC", "emoji": "🎡",  "celsius": True, "timezone": "Europe/London"},
     {"name": "Seoul",         "lat": 37.5665,  "lon": 126.9780,  "station": "RKSS", "emoji": "🏮",  "celsius": True, "timezone": "Asia/Seoul"},
+    {"name": "Paris",         "lat": 48.8566,  "lon": 2.3522,    "station": "LFPG", "emoji": "🗼",  "celsius": True, "timezone": "Europe/Paris"},
 ]
 
 TEMP_THRESHOLDS_F = [40, 45, 50, 55, 60, 62, 64, 65, 66, 67, 68, 69, 70, 72, 75, 80, 85, 90]

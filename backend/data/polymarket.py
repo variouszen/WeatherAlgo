@@ -38,9 +38,10 @@ CITY_ALIASES = {
     "Philadelphia":  ["philadelphia", "philly"],
     "London":        ["london"],
     "Seoul":         ["seoul"],
+    "Paris":         ["paris"],
 }
 
-CITY_CELSIUS = {"London", "Seoul"}
+CITY_CELSIUS = {"London", "Seoul", "Paris"}
 
 # Slippage haircut: assume you get 2% worse than displayed midpoint
 # Makes paper trading closer to live reality on thin markets
