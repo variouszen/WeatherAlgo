@@ -24,7 +24,7 @@ BOT_CONFIG = {
     "min_edge": float(os.getenv("MIN_EDGE", "0.08")),
     "min_confidence": float(os.getenv("MIN_CONFIDENCE", "0.68")),
     "min_event_volume":  float(os.getenv("MIN_EVENT_VOLUME",  "30000")),
-    "min_bucket_volume": float(os.getenv("MIN_BUCKET_VOLUME", "10000")),
+    "min_bucket_volume": float(os.getenv("MIN_BUCKET_VOLUME", "5000")),
 
     # --- Directional gate (HARD — no override) ---
     # YES trade only if forecast > threshold, NO trade only if forecast < threshold
