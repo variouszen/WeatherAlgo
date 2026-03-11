@@ -269,12 +269,17 @@ async def open_paper_trade(
     edge = abs(noaa_prob - market_data["yes_price"])
     unit = noaa_data.get("unit", "F")
 
+    # Extract market_date from end_date (e.g. "2026-03-11T23:00:00Z" -> "2026-03-11")
+    raw_end = market_data.get("end_date", "") or ""
+    market_date_str = raw_end[:10] if len(raw_end) >= 10 else None
+
     trade = Trade(
         city=city,
         station_id=station_id,
         threshold_f=threshold,
         direction=direction,
         market_condition=f"High >= {threshold}{unit}",
+        market_date=market_date_str,
         polymarket_market_id=market_data.get("market_id"),
         polymarket_token_id=market_data.get("token_id"),
         market_yes_price=market_data["yes_price"],

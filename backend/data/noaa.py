@@ -3,6 +3,7 @@ import httpx
 import asyncio
 import logging
 from typing import Optional
+from datetime import datetime, timedelta, timezone
 from scipy import stats
 import numpy as np
 import sys, os
@@ -133,10 +134,13 @@ def compute_confidence(sigma: float) -> float:
     return round(float(np.clip(1.0 - (sigma - 3.0) / 10.0, 0.50, 0.95)), 3)
 
 
-async def fetch_openmeteo_forecast(lat: float, lon: float, day_offset: int, client: httpx.AsyncClient) -> Optional[dict]:
+async def fetch_openmeteo_forecast(lat: float, lon: float, day_offset: int, client: httpx.AsyncClient, target_date: str = None) -> Optional[dict]:
     """
     Fetch daily high temperature from Open-Meteo for international cities.
     Returns temp in °C. Retries up to 3 times with backoff on 429/504.
+
+    If target_date (YYYY-MM-DD) is provided, matches by date string rather than
+    array index — fixes the day offset bug when scanning after local midnight.
     """
     for attempt in range(3):
         try:
@@ -146,8 +150,8 @@ async def fetch_openmeteo_forecast(lat: float, lon: float, day_offset: int, clie
                     "latitude": lat,
                     "longitude": lon,
                     "daily": "temperature_2m_max,temperature_2m_min",
-                    "timezone": "auto",
-                    "forecast_days": 3,
+                    "timezone": "UTC",
+                    "forecast_days": 4,
                 },
                 timeout=15.0,
             )
@@ -159,14 +163,21 @@ async def fetch_openmeteo_forecast(lat: float, lon: float, day_offset: int, clie
             r.raise_for_status()
             data = r.json()
             daily = data.get("daily", {})
+            dates = daily.get("time", [])
             highs = daily.get("temperature_2m_max", [])
             lows  = daily.get("temperature_2m_min", [])
-            if len(highs) > day_offset:
-                return {
-                    "high_c": float(highs[day_offset]),
-                    "low_c":  float(lows[day_offset]) if len(lows) > day_offset else None,
-                }
-            return None
+
+            if target_date and target_date in dates:
+                idx = dates.index(target_date)
+            elif len(highs) > day_offset:
+                idx = day_offset
+            else:
+                return None
+
+            return {
+                "high_c": float(highs[idx]),
+                "low_c":  float(lows[idx]) if len(lows) > idx else None,
+            }
         except Exception as e:
             logger.warning(f"[OpenMeteo] fetch failed ({lat},{lon}): {e}")
             if attempt < 2:
@@ -206,7 +217,11 @@ async def fetch_city_forecast(city: dict, day_offset: int, client: httpx.AsyncCl
 
     if is_celsius:
         # ── International: Open-Meteo ─────────────────────────────────────────
-        om = await fetch_openmeteo_forecast(lat, lon, day_offset, client)
+        # Always fetch by explicit UTC date to avoid day-offset bug at night.
+        # Polymarket markets resolve on tomorrow UTC, so compute that date.
+        utc_now = datetime.now(timezone.utc)
+        target_date = (utc_now + timedelta(days=day_offset + 1)).strftime("%Y-%m-%d") if utc_now.hour < 12 else (utc_now + timedelta(days=day_offset)).strftime("%Y-%m-%d")
+        om = await fetch_openmeteo_forecast(lat, lon, day_offset, client, target_date=target_date)
         if not om:
             return None
 
