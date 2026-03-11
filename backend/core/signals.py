@@ -50,7 +50,6 @@ def evaluate_signal(
     threshold: float,
     noaa_prob: float,
     market_yes_price: float,
-    volume: float,
     confidence: float,
     direction: str,
     bankroll: float,
@@ -130,28 +129,24 @@ def evaluate_signal(
     if confidence < effective_min_confidence:
         return False, f"Confidence {confidence:.1%} < min {effective_min_confidence:.1%}", {}
 
-    # ── Filter 5: Volume ──────────────────────────────────────────────────────
-    if volume < cfg["min_market_volume"]:
-        return False, f"Volume ${volume:,.0f} < min ${cfg['min_market_volume']:,.0f}", {}
-
-    # ── Filter 6: Price bounds ────────────────────────────────────────────────
+    # ── Filter 5: Price bounds ────────────────────────────────────────────────
     if direction == "YES" and market_yes_price > cfg["max_yes_price"]:
         return False, f"YES price {market_yes_price:.2f} > max {cfg['max_yes_price']:.2f}", {}
     if direction == "NO" and market_yes_price < cfg["min_no_price"]:
         return False, f"NO side: YES price {market_yes_price:.2f} < floor {cfg['min_no_price']:.2f}", {}
 
-    # ── Filter 7: Crowd conviction ────────────────────────────────────────────
+    # ── Filter 6: Crowd conviction ────────────────────────────────────────────
     if direction == "NO" and market_yes_price > cfg["max_yes_price_for_no"]:
         return False, (
             f"Crowd conviction too high: YES at {market_yes_price:.2f} > "
             f"{cfg['max_yes_price_for_no']:.2f} — skipping NO"
         ), {}
 
-    # ── Filter 8: One position per city (unless re-entry enabled) ────────────
+    # ── Filter 7: One position per city (unless re-entry enabled) ────────────
     if city in open_city_positions and entry_number == 1:
         return False, f"Already have open position in {city}", {}
 
-    # ── Filter 9: Bankroll floor ──────────────────────────────────────────────
+    # ── Filter 8: Bankroll floor ──────────────────────────────────────────────
     if bankroll < cfg["bankroll_floor"]:
         return False, f"Bankroll ${bankroll:.2f} below floor ${cfg['bankroll_floor']:.2f}", {}
 

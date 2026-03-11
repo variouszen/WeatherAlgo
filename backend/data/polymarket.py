@@ -512,7 +512,7 @@ async def build_market_map(
                 logger.info(
                     f"[POLY] ✓ {city}/{market_date_str} | {len(buckets)} buckets | "
                     f"{len(direct_thresholds)} direct thresholds | "
-                    f"Vol=${total_volume:,.0f} | slug={slug}"
+                    f"EventVol=${event_volume:,.0f} BucketsVol=${total_volume:,.0f} | slug={slug}"
                 )
 
                 # ── Populate market_map ───────────────────────────────────────

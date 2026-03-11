@@ -62,7 +62,8 @@ STARTING_BANKROLL   = 2000.0
 DRY_RUN             = true
 MIN_EDGE            = 0.08
 MIN_CONFIDENCE      = 0.68
-MIN_VOLUME          = 35000
+MIN_EVENT_VOLUME    = 50000
+MIN_BUCKET_VOLUME   = 10000
 ```
 
 ### 5. Deploy
@@ -123,11 +124,14 @@ Every 5 minutes:
   3. Fetch GFS + ECMWF validator forecasts (multi-model consensus)
   4. Settle open positions where result is clear
   5. For each city × threshold (direct bucket matches only):
+     - Liquidity gate (scanner.py, before signal eval):
+         EventVol >= $50k  (event-level Polymarket volume)
+         BucketVol >= $10k (matched bucket volume)
      - Directional gate: forecast must agree with trade direction
      - Buffer filter: forecast must clear threshold by ≥4°F / 1.5°C
      - P(high >= threshold) via Normal(forecast, sigma)
      - Edge = |NOAA_prob - market_price|
-     - If edge >= 8% AND confidence >= 68% AND volume >= $35k:
+     - If edge >= 8% AND confidence >= 68%:
        → Compute Quarter-Kelly size (capped at 2% bankroll)
        → Paper trade best signal per city
   6. Log everything to Postgres

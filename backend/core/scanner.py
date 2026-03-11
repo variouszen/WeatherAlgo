@@ -9,7 +9,7 @@ import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import BOT_CONFIG, CITIES, TEMP_THRESHOLDS_F, TEMP_THRESHOLDS_C, TEMP_THRESHOLDS
 from data.noaa import (
-    get_nws_daily_high, get_openmeteo_daily_high,
+    fetch_all_cities, get_nws_daily_high, get_openmeteo_daily_high,
     get_openmeteo_forecast_high, fetch_gfs_forecast_high, fetch_ecmwf_forecast_high
 )
 from data.polymarket import build_market_map
@@ -132,7 +132,7 @@ async def fetch_validator_forecasts(city_cfg: dict, day_offset: int = 0) -> dict
 async def run_scan() -> dict:
     """
     Full scan cycle V2:
-    1. Fetch primary forecasts (NOAA for US, ECMWF for intl via fetch_city_forecast)
+    1. Fetch primary forecasts (NOAA for US, ECMWF for intl via fetch_all_cities)
     2. Fetch GFS + ECMWF validator forecasts per city
     3. Fetch Polymarket prices
     4. Settle open positions
@@ -331,6 +331,31 @@ async def run_scan() -> dict:
                     # market_date_str is now authoritative from city_date_map — no parsing needed
                     market_date_str = city_market_date
 
+                    # ── Two-level liquidity gate ──────────────────────────────
+                    # Level 1: event-level volume (total traded on this event)
+                    event_vol = market_data.get("event_volume", 0.0)
+                    if event_vol < cfg["min_event_volume"]:
+                        log(f"SKIP {city} | MarketDate={market_date_str} | Bucket=>={threshold}{unit} | "
+                            f"EventVol ${event_vol:,.0f} < min ${cfg['min_event_volume']:,.0f}")
+                        continue
+
+                    # Level 2: bucket-level volume (volume on the matched bucket)
+                    matched_bucket = next(
+                        (b for b in market_data.get("buckets", []) if b["low"] == threshold),
+                        None,
+                    )
+                    if matched_bucket is None:
+                        bucket_vol = None
+                        log(f"SKIP {city} | MarketDate={market_date_str} | Bucket=>={threshold}{unit} | "
+                            f"BucketVol unavailable — no bucket with low=={threshold}")
+                        continue
+                    else:
+                        bucket_vol = matched_bucket.get("bucket_volume", 0.0)
+                        if bucket_vol < cfg["min_bucket_volume"]:
+                            log(f"SKIP {city} | MarketDate={market_date_str} | Bucket=>={threshold}{unit} | "
+                                f"BucketVol ${bucket_vol:,.0f} < min ${cfg['min_bucket_volume']:,.0f}")
+                            continue
+
                     # Re-entry state from DB keyed by city + actual market date
                     reentry = await _get_reentry_state_from_db(session, city, market_date_str)
                     entry_number = reentry["entry_count"] + 1
@@ -356,7 +381,6 @@ async def run_scan() -> dict:
                         threshold=threshold,
                         noaa_prob=noaa_prob,
                         market_yes_price=yes_price,
-                        volume=market_data["volume"],
                         confidence=f["confidence"],
                         direction=direction,
                         bankroll=bankroll_state.balance,
@@ -406,6 +430,7 @@ async def run_scan() -> dict:
                             f"Primary={primary_forecast:.1f} GFS={f'{gfs_forecast:.1f}' if gfs_forecast is not None else 'N/A'} "
                             f"ECMWF={f'{ecmwf_forecast:.1f}' if ecmwf_forecast is not None else 'N/A'} | "
                             f"Edge={edge:.1%} Models={sizing.get('models_agreed','?')} "
+                            f"EventVol=${event_vol:,.0f} BucketVol=${bucket_vol:,.0f} "
                             f"{'🌅EARLY' if is_early else ''} {'🔁RE-ENTRY' if entry_number > 1 else ''}"
                         )
                         # ── Bucket mapping diagnostics (feature-flagged, DB write) ──

@@ -1,7 +1,7 @@
 # backend/api/main.py
 import logging
 import asyncio
-from datetime import datetime, date, timezone
+from datetime import datetime, date
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -243,7 +243,7 @@ async def purge_stale_trades():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "dry_run": DRY_RUN, "timestamp": datetime.now(timezone.utc).isoformat()}
+    return {"status": "ok", "dry_run": DRY_RUN, "timestamp": datetime.utcnow().isoformat()}
 
 
 @app.post("/api/scan")
@@ -494,7 +494,7 @@ async def _purge_old_bucket_diagnostics():
     """Delete bucket_mapping_diagnostics rows older than 7 days. Safe to call on startup."""
     from datetime import timedelta
     from sqlalchemy import delete
-    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    cutoff = datetime.utcnow() - timedelta(days=7)
     try:
         async with AsyncSessionLocal() as session:
             async with session.begin():
@@ -636,10 +636,15 @@ async def debug_markets():
 
             if event:
                 markets = event.get("markets", [])
+                summed_bucket_vol = sum(
+                    float(m.get("volumeNum") or m.get("volume") or 0)
+                    for m in markets
+                )
                 sample_buckets = [
                     {
                         "label": m.get("groupItemTitle") or m.get("question", ""),
                         "outcomePrices": m.get("outcomePrices"),
+                        "bucket_volume": float(m.get("volumeNum") or m.get("volume") or 0),
                     }
                     for m in markets[:3]
                 ]
@@ -652,6 +657,8 @@ async def debug_markets():
                     "active": event.get("active"),
                     "closed": event.get("closed"),
                     "bucket_count": len(markets),
+                    "event_volume": float(event.get("volumeNum") or event.get("volume") or 0),
+                    "summed_bucket_volume": round(summed_bucket_vol, 2),
                     "sample_buckets": sample_buckets,
                 }
             else:
