@@ -178,6 +178,7 @@ async def run_scan() -> dict:
                 log(f"Polymarket fetch failed: {e}", "WARN")
                 scan_result["errors"].append(f"Polymarket: {e}")
                 market_map = {}
+                city_date_map = {}
 
             # Derive per-city day_offset from city_date_map returned by build_market_map.
             # city_date_map already tells us exactly which date was selected per city.

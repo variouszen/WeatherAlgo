@@ -449,6 +449,7 @@ async def build_market_map(
                 slug            = build_slug(city, target_date)
                 market_date_str = target_date.isoformat()
                 nested_markets  = event.get("markets", [])
+                event_volume    = float(event.get("volumeNum") or event.get("volume") or 0.0)
 
                 # ── Parse buckets ─────────────────────────────────────────────
                 buckets: list = []
@@ -483,11 +484,12 @@ async def build_market_map(
                     total_volume += vol
 
                     buckets.append({
-                        "label":    label,
-                        "low":      lo,
-                        "high":     hi,
-                        "price":    price,
-                        "token_id": token_id,
+                        "label":         label,
+                        "low":           lo,
+                        "high":          hi,
+                        "price":         price,
+                        "token_id":      token_id,
+                        "bucket_volume": vol,
                     })
 
                 # ── Quality gate ──────────────────────────────────────────────
@@ -526,11 +528,12 @@ async def build_market_map(
                         "event_slug":        slug,
                         "event_title":       title,
                         "yes_price":         cum_prob,
-                        "volume":            total_volume,
+                        "volume":            total_volume,   # kept for DB compat (market_volume column)
+                        "event_volume":      event_volume,   # event-level volume for liquidity gate
                         "unit":              unit,
                         "end_date":          end_date,
                         "bucket_count":      len(buckets),
-                        "buckets":           buckets,
+                        "buckets":           buckets,        # each bucket has bucket_volume field
                         "price_source":      "CLOB+Gamma/slug",
                         "direct_thresholds": direct_thresholds,
                     }
