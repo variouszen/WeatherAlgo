@@ -138,15 +138,67 @@ def extract_market_date(title: str) -> Optional[datetime.date]:
     return None
 
 
-def is_valid_market_date(title: str) -> bool:
+def is_valid_market_date(title: str, end_date: str = None) -> bool:
     """
-    Return True only if market is for today through today+5 days (UTC).
+    Return True only if market is still valid to enter.
+
+    Priority:
+    1. If endDate exists: use it as the hard filter
+       - Reject if already past
+       - Reject if within 3 hours of closing (too late to enter)
+    2. If endDate missing/malformed: fall back to title date parsing
+    3. If both exist: log a warning if they disagree by more than 1 day
     """
+    now_utc = datetime.now(timezone.utc)
+    today = now_utc.date()
+    min_entry_cutoff = now_utc + timedelta(hours=3)
+
+    # Primary: endDate from Polymarket
+    if end_date:
+        try:
+            end_date_str = str(end_date).strip()
+            if "T" in end_date_str:
+                end_dt = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
+            else:
+                end_dt = datetime(
+                    *[int(x) for x in end_date_str[:10].split("-")],
+                    23, 59, 59, tzinfo=timezone.utc
+                )
+
+            if end_dt <= now_utc:
+                logger.debug(f"[POLY] Rejecting expired market (endDate={end_date_str}): '{title[:55]}'")
+                return False
+
+            if end_dt <= min_entry_cutoff:
+                mins_left = int((end_dt - now_utc).total_seconds() // 60)
+                logger.debug(
+                    f"[POLY] Rejecting market closing too soon "
+                    f"({mins_left}min left, need 3h): '{title[:55]}'"
+                )
+                return False
+
+            # Sanity-check against title date
+            title_date = extract_market_date(title)
+            if title_date:
+                end_date_only = end_dt.date()
+                day_diff = abs((end_date_only - title_date).days)
+                if day_diff > 1:
+                    logger.warning(
+                        f"[POLY] Date mismatch: title says {title_date} but "
+                        f"endDate implies {end_date_only} (diff={day_diff}d): '{title[:55]}'"
+                    )
+
+            return True
+
+        except Exception as e:
+            logger.warning(f"[POLY] Could not parse endDate '{end_date}': {e} — falling back to title")
+
+    # Fallback: title date parsing
     market_date = extract_market_date(title)
     if market_date is None:
-        logger.debug(f"[POLY] Could not parse date from: '{title[:60]}'")
+        logger.debug(f"[POLY] Could not parse date from title: '{title[:60]}'")
         return False
-    today = datetime.now(timezone.utc).date()
+
     max_date = today + timedelta(days=5)
     valid = today <= market_date <= max_date
     if not valid:
@@ -297,7 +349,8 @@ async def build_market_map(cities: list, thresholds: list) -> dict:
             if not city or city not in cities:
                 continue
 
-            if not is_valid_market_date(title):
+            end_date = event.get("endDate") or event.get("end_date_iso") or event.get("end_date")
+            if not is_valid_market_date(title, end_date=end_date):
                 continue
 
             unit = "C" if city in CITY_CELSIUS else "F"
