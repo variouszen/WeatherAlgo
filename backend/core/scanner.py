@@ -146,34 +146,70 @@ async def run_scan() -> dict:
                 scan_result["errors"].append("Daily loss cap hit")
                 return scan_result
 
-            # ── Step 1: Fetch primary forecasts ───────────────────────────────
-            log("Fetching primary forecasts (NOAA/ECMWF)...")
+            # ── Step 1: Discover required day offsets from live markets ─────
+            # First fetch markets, then determine which days we need forecasts
+            # for — handles same-day, tomorrow, and multi-day-ahead markets.
+            log("Fetching Polymarket prices (pre-scan for day offsets)...")
             try:
-                forecasts = await fetch_all_cities(day_offset=0)
-                scan_result["cities_scanned"] = len(forecasts)
-                log(f"Primary forecasts: {len(forecasts)} cities")
+                market_map = await build_market_map(city_names, TEMP_THRESHOLDS_F + TEMP_THRESHOLDS_C)
+                log(f"Polymarket: {len(market_map)} city/threshold markets")
+            except Exception as e:
+                log(f"Polymarket fetch failed: {e}", "WARN")
+                scan_result["errors"].append(f"Polymarket: {e}")
+                market_map = {}
+
+            # Compute required day offsets from market end_dates
+            utc_today = datetime.now(timezone.utc).date()
+            required_offsets = set([0])  # always fetch today as fallback
+            for mkt in market_map.values():
+                end_date_str = mkt.get("end_date", "")
+                try:
+                    if end_date_str:
+                        ed = datetime.fromisoformat(str(end_date_str).replace("Z", "+00:00"))
+                        diff = (ed.date() - utc_today).days
+                        if 0 <= diff <= 7:  # only fetch up to 7 days out
+                            required_offsets.add(diff)
+                except Exception:
+                    pass
+            log(f"Fetching forecasts for day offsets: {sorted(required_offsets)}")
+
+            # ── Step 2: Fetch primary forecasts for all required offsets ──────
+            log("Fetching primary forecasts...")
+            forecast_map: dict[str, dict] = {}  # city -> {day_offset: forecast}
+            forecasts_d0 = []
+            try:
+                for offset in sorted(required_offsets):
+                    day_forecasts = await fetch_all_cities(day_offset=offset)
+                    if offset == 0:
+                        forecasts_d0 = day_forecasts
+                        scan_result["cities_scanned"] = len(day_forecasts)
+                    for f in day_forecasts:
+                        forecast_map.setdefault(f["city"], {})[offset] = f
+                log(f"Primary forecasts: {len(forecasts_d0)} cities x{len(required_offsets)} days")
             except Exception as e:
                 log(f"Primary forecast fetch failed: {e}", "WARN")
                 scan_result["errors"].append(f"Forecast: {e}")
                 return scan_result
 
-            forecast_map = {f["city"]: f for f in forecasts}
-
-            # ── Step 2: Fetch GFS + ECMWF validators (serialized) ─────────────
+            # ── Step 3a: Fetch GFS + ECMWF validators for all required offsets
             log("Fetching GFS + ECMWF validator forecasts...")
-            validator_map: dict[str, dict] = {}
+            validator_map: dict[str, dict] = {}  # city -> {day_offset: {gfs, ecmwf}}
             for i, city_cfg in enumerate(CITIES):
                 if i > 0:
                     await asyncio.sleep(0.5)
                 try:
-                    validators = await fetch_validator_forecasts(city_cfg, day_offset=0)
-                    validator_map[city_cfg["name"]] = validators
-                    gfs_val = f"{validators['gfs']:.1f}" if validators['gfs'] else "N/A"
-                    ecmwf_val = f"{validators['ecmwf']:.1f}" if validators['ecmwf'] else "N/A"
+                    city_validators = {}
+                    for offset in sorted(required_offsets):
+                        v = await fetch_validator_forecasts(city_cfg, day_offset=offset)
+                        city_validators[offset] = v
+                    validator_map[city_cfg["name"]] = city_validators
+                    v0 = city_validators.get(0, {})
+                    gfs_val = f"{v0['gfs']:.1f}" if v0.get('gfs') else "N/A"
+                    ecmwf_val = f"{v0['ecmwf']:.1f}" if v0.get('ecmwf') else "N/A"
                     log(f"Validators {city_cfg['name']}: GFS={gfs_val} ECMWF={ecmwf_val}")
                 except Exception as e:
                     log(f"Validator fetch failed for {city_cfg['name']}: {e}", "WARN")
-                    validator_map[city_cfg["name"]] = {"gfs": None, "ecmwf": None}
+                    validator_map[city_cfg["name"]] = {o: {"gfs": None, "ecmwf": None} for o in required_offsets}
 
             # ── Step 3: Settle open positions ─────────────────────────────────
             open_positions = await get_open_positions(session)
@@ -218,15 +254,8 @@ async def run_scan() -> dict:
                     trade.noaa_forecast_high, actual_high, trade.noaa_sigma
                 )
 
-            # ── Step 4: Fetch Polymarket prices ───────────────────────────────
-            log("Fetching Polymarket prices...")
-            try:
-                market_map = await build_market_map(city_names, TEMP_THRESHOLDS_F + TEMP_THRESHOLDS_C)
-                log(f"Polymarket: {len(market_map)} city/threshold markets")
-            except Exception as e:
-                log(f"Polymarket fetch failed: {e}", "WARN")
-                scan_result["errors"].append(f"Polymarket: {e}")
-                market_map = {}
+            # ── Step 4: Polymarket already fetched in Step 1 ────────────────
+            # market_map populated above for day offset detection
 
             # ── Step 5: Evaluate signals ──────────────────────────────────────
             open_after_settle = await get_open_positions(session)
@@ -235,17 +264,13 @@ async def run_scan() -> dict:
 
             best_per_city: dict[str, dict] = {}
 
-            for f in forecasts:
-                city = f["city"]
+            utc_today = datetime.now(timezone.utc).date()
+
+            for city, city_forecasts in forecast_map.items():
                 city_cfg_item = city_by_name.get(city, {})
                 is_celsius = city_cfg_item.get("celsius", False)
                 thresholds_for_city = TEMP_THRESHOLDS_C if is_celsius else TEMP_THRESHOLDS_F
                 unit = "C" if is_celsius else "F"
-
-                primary_forecast = f.get("forecast_high_f")
-                validators = validator_map.get(city, {"gfs": None, "ecmwf": None})
-                gfs_forecast = validators.get("gfs")
-                ecmwf_forecast = validators.get("ecmwf")
 
                 # Re-entry state for this city
                 reentry = _get_reentry_state(city)
@@ -260,10 +285,34 @@ async def run_scan() -> dict:
 
                     market_data = market_map[mkt_key]
                     yes_price = market_data["yes_price"]
+                    end_date_str = market_data.get("end_date", "")
+
+                    # ── Compute day_offset from market end_date ───────────────
+                    # This ensures we compare the forecast for the SAME day
+                    # the market resolves, not just today's forecast.
+                    day_offset = 0
+                    try:
+                        if end_date_str:
+                            ed = datetime.fromisoformat(str(end_date_str).replace("Z", "+00:00"))
+                            diff = (ed.date() - utc_today).days
+                            day_offset = max(0, diff)  # no clamp — use actual market date
+                    except Exception:
+                        day_offset = 0
+
+                    # Pick the forecast for the correct day
+                    f = city_forecasts.get(day_offset) or city_forecasts.get(0)
+                    if not f:
+                        continue
+
+                    primary_forecast = f.get("forecast_high_f")
+                    city_validators = validator_map.get(city, {})
+                    validators = city_validators.get(day_offset) or city_validators.get(0) or {"gfs": None, "ecmwf": None}
+                    gfs_forecast = validators.get("gfs")
+                    ecmwf_forecast = validators.get("ecmwf")
+
                     noaa_prob = f["bucket_probs"].get(threshold, 0)
                     direction = "YES" if noaa_prob > yes_price else "NO"
 
-                    end_date_str = market_data.get("end_date", "")
                     is_early = _is_early_window(end_date_str)
                     too_late_reentry = _is_too_late_for_reentry(end_date_str) if entry_number > 1 else False
 
