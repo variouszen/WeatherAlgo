@@ -23,8 +23,8 @@ BOT_CONFIG = {
     # --- Core filters (HARD — no override) ---
     "min_edge": float(os.getenv("MIN_EDGE", "0.08")),
     "min_confidence": float(os.getenv("MIN_CONFIDENCE", "0.68")),
-    "min_event_volume":  float(os.getenv("MIN_EVENT_VOLUME",  "5000"))   # lowered — just confirm market exists,
-    "min_bucket_volume": float(os.getenv("MIN_BUCKET_VOLUME", "500"))    # lowered — just confirm bucket is tradeable,
+    "min_event_volume":  float(os.getenv("MIN_EVENT_VOLUME",  "5000")),  # lowered — just confirm market exists
+    "min_bucket_volume": float(os.getenv("MIN_BUCKET_VOLUME", "500")),   # lowered — just confirm bucket is tradeable
 
     # --- Directional gate (HARD — no override) ---
     # YES trade only if forecast > threshold, NO trade only if forecast < threshold
