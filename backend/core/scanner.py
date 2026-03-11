@@ -24,41 +24,6 @@ city_names = [c["name"] for c in CITIES]
 city_by_name = {c["name"]: c for c in CITIES}
 
 
-async def fetch_openmeteo_forecasts() -> dict[str, float]:
-    """
-    Fetch today's forecast high from Open-Meteo for all cities.
-    Returns dict of {city_name: forecast_high} in native unit (F or C).
-    Used as second source for consensus filtering.
-
-    Serialized with 0.5s stagger between calls to avoid hammering the
-    Open-Meteo free tier rate limit (parallel bursts cause consistent 429s).
-    """
-    results = {}
-    for i, city_cfg in enumerate(CITIES):
-        if i > 0:
-            await asyncio.sleep(0.5)
-        city_name = city_cfg["name"]
-        try:
-            forecast = await get_openmeteo_forecast_high(
-                city_cfg["lat"],
-                city_cfg["lon"],
-                day_offset=0,
-                celsius=city_cfg.get("celsius", False),
-                city_timezone=city_cfg.get("timezone", "UTC"),
-            )
-            if forecast is None:
-                logger.warning(f"[OM] Failed to get forecast for {city_name}: None")
-                results[city_name] = None
-            else:
-                results[city_name] = forecast
-                logger.info(f"[OM] {city_name}: {forecast:.1f}")
-        except Exception as e:
-            logger.warning(f"[OM] Failed to get forecast for {city_name}: {e}")
-            results[city_name] = None
-
-    return results
-
-
 async def run_scan() -> dict:
     """
     Full scan cycle v2:
@@ -110,16 +75,6 @@ async def run_scan() -> dict:
                 return scan_result
 
             forecast_map = {f["city"]: f for f in forecasts}
-
-            # ── Step 2: Fetch Open-Meteo (second source) ──────────────────────
-            log("Fetching Open-Meteo forecasts (consensus source)...")
-            try:
-                om_forecasts = await fetch_openmeteo_forecasts()
-                om_count = sum(1 for v in om_forecasts.values() if v is not None)
-                log(f"Open-Meteo: Got forecasts for {om_count}/{len(CITIES)} cities")
-            except Exception as e:
-                log(f"Open-Meteo fetch failed: {e} — will skip consensus filter", "WARN")
-                om_forecasts = {}
 
             # ── Step 3: Settle open positions ─────────────────────────────────
             open_positions = await get_open_positions(session)
@@ -197,9 +152,7 @@ async def run_scan() -> dict:
                 is_celsius = city_cfg.get("celsius", False)
                 thresholds_for_city = TEMP_THRESHOLDS_C if is_celsius else TEMP_THRESHOLDS_F
 
-                # Get Open-Meteo forecast for this city (second source)
-                om_forecast = om_forecasts.get(city)
-                noaa_raw = f.get("forecast_high_f")  # raw NOAA forecast high
+                noaa_raw = f.get("forecast_high_f")  # raw forecast high
 
                 for threshold in thresholds_for_city:
                     mkt_key = (city, threshold)
@@ -223,10 +176,7 @@ async def run_scan() -> dict:
                         bankroll=bankroll_state.balance,
                         open_city_positions=list(open_city_set),
                         open_yes_positions=open_yes_count,
-                        # Multi-source consensus args
-                        noaa_forecast=noaa_raw,
-                        openmeteo_forecast=om_forecast,
-                        is_celsius=is_celsius,
+
                     )
 
                     edge = abs(noaa_prob - yes_price)
@@ -245,13 +195,12 @@ async def run_scan() -> dict:
                             "market_data": market_data,
                             "forecast": f,
                             "noaa_raw": noaa_raw,
-                            "om_raw": om_forecast,
                         }
                         if city not in best_per_city or edge > best_per_city[city]["edge"]:
                             best_per_city[city] = signal_info
                         log(
                             f"SIGNAL {city} >={threshold}{unit} {direction} | "
-                            f"NOAA={noaa_raw:.1f} OM={om_forecast:.1f if om_forecast else 'N/A'} | "
+                            f"NOAA={noaa_raw:.1f} | "
                             f"NOAA_prob={noaa_prob:.1%} Mkt={yes_price:.2f} Edge={edge:.1%} | ${sizing.get('size_usd', 0)}"
                         )
                     else:
@@ -278,7 +227,7 @@ async def run_scan() -> dict:
                 scan_result["trades_opened"] += 1
                 log(
                     f"TRADE OPENED: {city} >={sig['threshold']}{sig['forecast'].get('unit','F')} {sig['direction']} | "
-                    f"NOAA={sig['noaa_raw']:.1f} OM={sig['om_raw']:.1f if sig['om_raw'] else 'N/A'} | "
+                    f"NOAA={sig['noaa_raw']:.1f} | "
                     f"${sig['sizing']['size_usd']} | Bankroll->${bankroll_state.balance:.2f}"
                 )
 

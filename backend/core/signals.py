@@ -56,19 +56,15 @@ def evaluate_signal(
     bankroll: float,
     open_city_positions: list[str],
     open_yes_positions: int,
-    # Multi-source consensus inputs (NEW)
-    noaa_forecast: float = None,        # NOAA raw forecast high
-    openmeteo_forecast: float = None,   # Open-Meteo raw forecast high
-    is_celsius: bool = False,
+
 ) -> tuple[bool, str, dict]:
     """
     Run all filters. Returns (should_trade, reason, sizing_info).
 
-    v2 changes:
-    - Requires both NOAA and Open-Meteo to agree on direction
-    - Requires minimum buffer between consensus forecast and threshold
-    - Skips NO trades when crowd is already 80%+ on YES
-    - Skips trades when source spread is too wide (high uncertainty)
+    v3: Single-source per city type.
+    - US cities: NOAA only (no OM consensus)
+    - International cities: Open-Meteo only (no fake consensus)
+    - Filters: edge, confidence, volume, price bounds, crowd conviction, bankroll floor
     """
     cfg = BOT_CONFIG
 
@@ -109,54 +105,6 @@ def evaluate_signal(
     # ── Filter 7: Bankroll floor ──────────────────────────────────────────────
     if bankroll < cfg["bankroll_floor"]:
         return False, f"Bankroll ${bankroll:.2f} below floor ${cfg['bankroll_floor']:.2f}", {}
-
-    # ── Filter 8: Multi-source consensus (NEW) ────────────────────────────────
-    if cfg.get("require_source_consensus") and noaa_forecast is not None:
-        # Missing OM data is a consensus failure — do not allow single-source trades
-        if openmeteo_forecast is None:
-            return False, "No Open-Meteo data — cannot confirm source consensus", {}
-    if cfg.get("require_source_consensus") and noaa_forecast is not None and openmeteo_forecast is not None:
-
-        max_spread = cfg["max_source_spread_c"] if is_celsius else cfg["max_source_spread_f"]
-        min_buffer = cfg["min_buffer_c"] if is_celsius else cfg["min_buffer_f"]
-
-        spread = abs(noaa_forecast - openmeteo_forecast)
-
-        # 8a: Source spread check — if sources disagree too much, skip
-        if spread > max_spread:
-            return False, (
-                f"Source spread {spread:.1f}° too wide (NOAA={noaa_forecast:.1f} "
-                f"OM={openmeteo_forecast:.1f} max={max_spread}°) — forecast uncertain"
-            ), {}
-
-        # 8b: Direction consensus — both sources must agree on which side of threshold
-        noaa_above = noaa_forecast >= threshold
-        om_above = openmeteo_forecast >= threshold
-
-        if noaa_above != om_above:
-            return False, (
-                f"Sources disagree on direction: NOAA={noaa_forecast:.1f} "
-                f"({'above' if noaa_above else 'below'}) OM={openmeteo_forecast:.1f} "
-                f"({'above' if om_above else 'below'}) threshold={threshold}"
-            ), {}
-
-        # 8c: Buffer check — consensus forecast must clear threshold by min_buffer
-        # Use the more conservative of the two forecasts for buffer calculation
-        if direction == "YES":
-            # For YES, use the lower forecast as the conservative estimate
-            conservative_forecast = min(noaa_forecast, openmeteo_forecast)
-            buffer = conservative_forecast - threshold
-        else:
-            # For NO, use the higher forecast as the conservative estimate
-            conservative_forecast = max(noaa_forecast, openmeteo_forecast)
-            buffer = threshold - conservative_forecast
-
-        if buffer < min_buffer:
-            unit = "°C" if is_celsius else "°F"
-            return False, (
-                f"Insufficient buffer: {buffer:.1f}{unit} < min {min_buffer}{unit} "
-                f"(conservative forecast={conservative_forecast:.1f}, threshold={threshold})"
-            ), {}
 
     # ── All filters passed — compute sizing ───────────────────────────────────
     sizing = compute_kelly_size(edge, entry_price, confidence, bankroll, open_yes_positions)
@@ -201,35 +149,12 @@ async def open_paper_trade(
     edge = abs(noaa_prob - market_data["yes_price"])
     unit = noaa_data.get("unit", "F")
 
-    # Extract the target date from the Polymarket market title
-    # e.g. "Highest temperature in NYC on March 11?" → "2026-03-11"
-    market_date_str = None
-    market_title = market_data.get("title", "")
-    if market_title:
-        import re
-        from datetime import datetime as _dt, timezone
-        m = re.search(
-            r'\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})\b',
-            market_title.lower()
-        )
-        if m:
-            try:
-                year = _dt.now(timezone.utc).year
-                parsed = _dt.strptime(f"{m.group(1)} {m.group(2)} {year}", "%B %d %Y")
-                market_date_str = parsed.date().isoformat()
-            except ValueError:
-                pass
-    # Fallback: use end_date from market_data if available
-    if not market_date_str and market_data.get("end_date"):
-        market_date_str = str(market_data["end_date"])[:10]
-
     trade = Trade(
         city=city,
         station_id=station_id,
         threshold_f=threshold,
         direction=direction,
         market_condition=f"High >= {threshold}{unit}",
-        market_date=market_date_str,
         polymarket_market_id=market_data.get("market_id"),
         polymarket_token_id=market_data.get("token_id"),
         market_yes_price=market_data["yes_price"],
