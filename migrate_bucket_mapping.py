@@ -14,8 +14,11 @@ import asyncio
 import sys
 import os
 
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from config import DATABASE_URL
+# Read directly from env — avoids path issues when running from repo root
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+if not DATABASE_URL:
+    print("ERROR: DATABASE_URL env var not set")
+    sys.exit(1)
 
 CREATE_SQL = """
 CREATE TABLE IF NOT EXISTS bucket_mapping_diagnostics (
