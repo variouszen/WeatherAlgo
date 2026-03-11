@@ -547,6 +547,7 @@ async def fetch_ecmwf_forecast_high(
 
 
 
+async def fetch_all_cities(day_offset: int = 0) -> list[dict]:
     """Fetch forecasts for all configured cities concurrently."""
     results = []
     async with httpx.AsyncClient() as client:
