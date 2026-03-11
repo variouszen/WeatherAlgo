@@ -12,7 +12,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import BOT_CONFIG, STARTING_BANKROLL, DRY_RUN
 from models.database import (
     init_db, AsyncSessionLocal,
-    Trade, BankrollState, ScanLog, CityCalibration
+    Trade, BankrollState, ScanLog, CityCalibration,
+    BucketMappingDiagnostic,
 )
 from core.signals import get_bankroll
 from core.scanner import run_scan
@@ -42,6 +43,7 @@ async def startup():
     logger.info("Starting Weather Arb Bot...")
     await init_db()
     logger.info(f"DB initialized | DRY_RUN={DRY_RUN} | Starting bankroll=${STARTING_BANKROLL}")
+    await _purge_old_bucket_diagnostics()
 
     # Start background scheduler
     asyncio.create_task(scan_scheduler())
@@ -486,6 +488,122 @@ def _scan_log_to_dict(s: ScanLog) -> dict:
         "errors": s.errors,
         "duration_ms": s.duration_ms,
     }
+
+
+async def _purge_old_bucket_diagnostics():
+    """Delete bucket_mapping_diagnostics rows older than 7 days. Safe to call on startup."""
+    from datetime import timedelta
+    from sqlalchemy import delete
+    cutoff = datetime.utcnow() - timedelta(days=7)
+    try:
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                result = await session.execute(
+                    delete(BucketMappingDiagnostic).where(
+                        BucketMappingDiagnostic.scanned_at < cutoff
+                    )
+                )
+                deleted = result.rowcount
+                if deleted:
+                    logger.info(f"[BUCKET] Purged {deleted} diagnostic rows older than 7 days")
+    except Exception as e:
+        logger.warning(f"[BUCKET] Purge failed (non-fatal): {e}")
+
+
+@app.get("/api/debug/bucket-mapping/summary")
+async def bucket_mapping_summary():
+    """
+    Daily summary of bucket mapping diagnostics.
+    Returns counts by match type, avg prob gap, and top 10 mismatches.
+    Compact enough to paste into a chat for analysis.
+    """
+    from datetime import timedelta
+    from sqlalchemy import cast, Date as SADate
+
+    async with AsyncSessionLocal() as session:
+        today_str = datetime.utcnow().date().isoformat()
+
+        # All rows from today
+        result = await session.execute(
+            select(BucketMappingDiagnostic)
+            .where(func.date(BucketMappingDiagnostic.scanned_at) == today_str)
+            .order_by(desc(BucketMappingDiagnostic.scanned_at))
+        )
+        rows = result.scalars().all()
+
+        if not rows:
+            return {"today": today_str, "mapped_candidates": 0, "message": "No bucket diagnostics today. Is BUCKET_MAPPING=1 set?"}
+
+        counts = {"exact": 0, "nearest": 0, "basket_only": 0, "parse_fail": 0}
+        gaps = []
+        for r in rows:
+            mt = r.match_type if r.match_type in counts else "parse_fail"
+            counts[mt] += 1
+            if r.prob_gap is not None:
+                gaps.append((r.prob_gap, r))
+
+        avg_gap = round(sum(g[0] for g in gaps) / len(gaps), 4) if gaps else None
+        top_mismatches = sorted(gaps, key=lambda x: x[0], reverse=True)[:10]
+
+        return {
+            "today": today_str,
+            "mapped_candidates": len(rows),
+            "exact": counts["exact"],
+            "nearest": counts["nearest"],
+            "basket_only": counts["basket_only"],
+            "parse_fail": counts["parse_fail"],
+            "avg_gap_synthetic_vs_basket": avg_gap,
+            "top_mismatches": [
+                {
+                    "city": r.city,
+                    "threshold": r.threshold,
+                    "direction": r.direction,
+                    "synthetic_prob": r.synthetic_prob,
+                    "basket_yes_prob": r.basket_yes_prob,
+                    "prob_gap": r.prob_gap,
+                    "match_type": r.match_type,
+                    "note": r.approximation_note,
+                }
+                for _, r in top_mismatches
+            ],
+        }
+
+
+@app.get("/api/debug/bucket-mapping/detail")
+async def bucket_mapping_detail(limit: int = 100):
+    """
+    Last N bucket mapping diagnostic rows, newest first.
+    Default 100, max 200.
+    """
+    limit = min(limit, 200)
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(BucketMappingDiagnostic)
+            .order_by(desc(BucketMappingDiagnostic.scanned_at))
+            .limit(limit)
+        )
+        rows = result.scalars().all()
+        return [
+            {
+                "id": r.id,
+                "scanned_at": r.scanned_at.isoformat() if r.scanned_at else None,
+                "city": r.city,
+                "market_date": r.market_date,
+                "threshold": r.threshold,
+                "direction": r.direction,
+                "synthetic_prob": r.synthetic_prob,
+                "synthetic_edge": r.synthetic_edge,
+                "match_type": r.match_type,
+                "is_directly_tradable": r.is_directly_tradable,
+                "nearest_bucket_label": r.nearest_bucket_label,
+                "basket_count": r.basket_count,
+                "basket_yes_prob": r.basket_yes_prob,
+                "prob_gap": r.prob_gap,
+                "approximation_note": r.approximation_note,
+                "polymarket_market_id": r.polymarket_market_id,
+            }
+            for r in rows
+        ]
 
 
 @app.get("/api/debug/markets")

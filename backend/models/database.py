@@ -127,6 +127,41 @@ class CityCalibration(Base):
     recorded_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+
+
+class BucketMappingDiagnostic(Base):
+    """
+    One row per candidate signal per scan when BUCKET_MAPPING=1.
+    Stores synthetic vs real-bucket interpretation for comparison.
+    Auto-purged after 7 days. Never affects trade execution.
+    """
+    __tablename__ = "bucket_mapping_diagnostics"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    scanned_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    # Signal identity
+    city: Mapped[str] = mapped_column(String(50))
+    market_date: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)   # "2026-03-12"
+    threshold: Mapped[float] = mapped_column(Float)
+    direction: Mapped[str] = mapped_column(String(5))
+
+    # Synthetic side
+    synthetic_prob: Mapped[float] = mapped_column(Float)        # noaa cumulative prob
+    synthetic_edge: Mapped[float] = mapped_column(Float)        # abs(synthetic_prob - market_yes_price)
+
+    # Bucket mapping result
+    match_type: Mapped[str] = mapped_column(String(20))         # exact / nearest / basket_only / parse_fail
+    is_directly_tradable: Mapped[bool] = mapped_column(Boolean, default=False)
+    nearest_bucket_label: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    basket_count: Mapped[int] = mapped_column(Integer, default=0)
+    basket_yes_prob: Mapped[float] = mapped_column(Float, default=0.0)
+    prob_gap: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # abs(synthetic_prob - basket_yes_prob)
+    approximation_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Market reference
+    polymarket_market_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+
 async def init_db():
     """Create all tables on startup. Safe to call multiple times."""
     async with engine.begin() as conn:

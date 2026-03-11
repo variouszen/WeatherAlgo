@@ -412,6 +412,24 @@ async def run_scan() -> dict:
                             f"Edge={edge:.1%} Models={sizing.get('models_agreed','?')} "
                             f"{'🌅EARLY' if is_early else ''} {'🔁RE-ENTRY' if entry_number > 1 else ''}"
                         )
+                        # ── Bucket mapping diagnostics (feature-flagged, DB write) ──
+                        # Never blocks trades. Enable via env var BUCKET_MAPPING=1.
+                        try:
+                            from data.bucket_mapping import BUCKET_MAPPING_ENABLED, store_bucket_mapping
+                            if BUCKET_MAPPING_ENABLED:
+                                await store_bucket_mapping(
+                                    session=session,
+                                    city=city,
+                                    threshold=threshold,
+                                    direction=direction,
+                                    synthetic_prob=noaa_prob,
+                                    synthetic_edge=edge,
+                                    market_data=market_data,
+                                    is_celsius=is_celsius,
+                                    market_date=market_date_str,
+                                )
+                        except Exception:
+                            pass
                     else:
                         if edge >= 0.05:
                             log(f"SKIP {city} >={threshold}{unit} | {reason} | Edge={edge:.1%}")

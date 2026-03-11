@@ -228,6 +228,12 @@ def parse_bucket_range(label: str) -> Optional[tuple]:
     if m:
         return (float("-inf"), float(m.group(1)))
 
+    # "X or below" / "X or lower" / "X or under" / "X and below"
+    # Must come before the range pattern to avoid "49" matching as a range fragment
+    m = re.search(r"(-?\d+(?:\.\d+)?)\s*(?:°?[fc])?\s*(?:or below|or lower|or under|and below|and under)", s)
+    if m:
+        return (float("-inf"), float(m.group(1)))
+
     # "X or higher" / "X+" / "X and above"
     m = re.search(r"(-?\d+(?:\.\d+)?)\s*(?:°?[fc])?\s*(?:or higher|or above|and above|\+|&\s*above)", s)
     if m:
