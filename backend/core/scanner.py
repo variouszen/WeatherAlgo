@@ -9,7 +9,7 @@ import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import BOT_CONFIG, CITIES, TEMP_THRESHOLDS_F, TEMP_THRESHOLDS_C, TEMP_THRESHOLDS
 from data.noaa import (
-    fetch_all_cities, get_nws_daily_high, get_openmeteo_daily_high,
+    get_nws_daily_high, get_openmeteo_daily_high,
     get_openmeteo_forecast_high, fetch_gfs_forecast_high, fetch_ecmwf_forecast_high
 )
 from data.polymarket import build_market_map
@@ -132,7 +132,7 @@ async def fetch_validator_forecasts(city_cfg: dict, day_offset: int = 0) -> dict
 async def run_scan() -> dict:
     """
     Full scan cycle V2:
-    1. Fetch primary forecasts (NOAA for US, ECMWF for intl via fetch_all_cities)
+    1. Fetch primary forecasts (NOAA for US, ECMWF for intl via fetch_city_forecast)
     2. Fetch GFS + ECMWF validator forecasts per city
     3. Fetch Polymarket prices
     4. Settle open positions
@@ -142,7 +142,7 @@ async def run_scan() -> dict:
     """
     start_ms = int(time.time() * 1000)
     scan_result = {
-        "started_at": datetime.utcnow().isoformat(),
+        "started_at": datetime.now(timezone.utc).isoformat(),
         "cities_scanned": 0,
         "signals_found": 0,
         "trades_opened": 0,
@@ -242,7 +242,7 @@ async def run_scan() -> dict:
             open_positions = await get_open_positions(session)
             log(f"Open positions: {len(open_positions)}")
 
-            now_utc = datetime.utcnow()
+            now_utc = datetime.now(timezone.utc)
             today = now_utc.date()
             settlement_hour_utc = 20
 

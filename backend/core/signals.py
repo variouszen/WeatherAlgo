@@ -1,7 +1,7 @@
 # backend/core/signals.py
 import logging
 import math
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
@@ -347,7 +347,7 @@ async def settle_trade(
 
     trade.status = status
     trade.actual_high_f = actual_high_f
-    trade.resolved_at = datetime.utcnow()
+    trade.resolved_at = datetime.now(timezone.utc)
     trade.gross_pnl = gross_pnl
     trade.fees_usd = fees
     trade.net_pnl = net_pnl

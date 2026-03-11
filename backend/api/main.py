@@ -1,7 +1,7 @@
 # backend/api/main.py
 import logging
 import asyncio
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -243,7 +243,7 @@ async def purge_stale_trades():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "dry_run": DRY_RUN, "timestamp": datetime.utcnow().isoformat()}
+    return {"status": "ok", "dry_run": DRY_RUN, "timestamp": datetime.now(timezone.utc).isoformat()}
 
 
 @app.post("/api/scan")
@@ -494,7 +494,7 @@ async def _purge_old_bucket_diagnostics():
     """Delete bucket_mapping_diagnostics rows older than 7 days. Safe to call on startup."""
     from datetime import timedelta
     from sqlalchemy import delete
-    cutoff = datetime.utcnow() - timedelta(days=7)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
     try:
         async with AsyncSessionLocal() as session:
             async with session.begin():

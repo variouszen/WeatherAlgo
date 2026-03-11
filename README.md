@@ -62,7 +62,7 @@ STARTING_BANKROLL   = 2000.0
 DRY_RUN             = true
 MIN_EDGE            = 0.08
 MIN_CONFIDENCE      = 0.68
-MIN_VOLUME          = 50000
+MIN_VOLUME          = 35000
 ```
 
 ### 5. Deploy
@@ -118,16 +118,19 @@ https://your-app.railway.app/docs
 
 ```
 Every 5 minutes:
-  1. Fetch NOAA forecast highs (real API)
-  2. Fetch Polymarket Yes prices (real orderbook)
-  3. Settle open positions where result is clear (>2σ from threshold)
-  4. For each city × threshold:
+  1. Fetch Polymarket prices via slug-based discovery (exact event lookup)
+  2. Fetch NOAA/ECMWF primary forecasts for the correct market date per city
+  3. Fetch GFS + ECMWF validator forecasts (multi-model consensus)
+  4. Settle open positions where result is clear
+  5. For each city × threshold (direct bucket matches only):
+     - Directional gate: forecast must agree with trade direction
+     - Buffer filter: forecast must clear threshold by ≥4°F / 1.5°C
      - P(high >= threshold) via Normal(forecast, sigma)
      - Edge = |NOAA_prob - market_price|
-     - If edge >= 8% AND confidence >= 68% AND volume >= $50k:
+     - If edge >= 8% AND confidence >= 68% AND volume >= $35k:
        → Compute Quarter-Kelly size (capped at 2% bankroll)
        → Paper trade best signal per city
-  5. Log everything to Postgres
+  6. Log everything to Postgres
 ```
 
 ---
