@@ -167,10 +167,59 @@ async def run_scan() -> dict:
                 scan_result["errors"].append("Daily loss cap hit")
                 return scan_result
 
-            # ── Step 1: Fetch primary forecasts ───────────────────────────────
-            log("Fetching primary forecasts (NOAA/ECMWF)...")
+            # ── Step 1: Fetch Polymarket prices FIRST ────────────────────────
+            # Must happen before forecasts so we know the correct resolve date
+            # per city and can fetch forecasts for the right day.
+            log("Fetching Polymarket prices...")
             try:
-                forecasts = await fetch_all_cities(day_offset=0)
+                market_map = await build_market_map(city_names, TEMP_THRESHOLDS_F + TEMP_THRESHOLDS_C)
+                log(f"Polymarket: {len(market_map)} city/threshold markets")
+            except Exception as e:
+                log(f"Polymarket fetch failed: {e}", "WARN")
+                scan_result["errors"].append(f"Polymarket: {e}")
+                market_map = {}
+
+            # Derive per-city day_offset from the market end_dates.
+            # A city can have markets for today AND tomorrow — use the earliest
+            # future resolve date as the target offset for that city's forecast.
+            utc_today = datetime.now(timezone.utc).date()
+            city_day_offset: dict[str, int] = {}
+            for (city_name, _threshold), mkt_data in market_map.items():
+                end_date_str = mkt_data.get("end_date", "")
+                if not end_date_str:
+                    continue
+                try:
+                    mkt_date = datetime.fromisoformat(
+                        str(end_date_str).replace("Z", "+00:00")
+                    ).date() if "T" in str(end_date_str) else datetime.strptime(str(end_date_str)[:10], "%Y-%m-%d").date()
+                    offset = (mkt_date - utc_today).days
+                    offset = max(0, min(offset, 6))  # clamp to 0-6
+                    # Keep the smallest valid offset for this city (soonest market)
+                    if city_name not in city_day_offset or offset < city_day_offset[city_name]:
+                        city_day_offset[city_name] = offset
+                except Exception:
+                    pass
+
+            log(f"City day offsets: { {k: v for k, v in city_day_offset.items()} }")
+
+            # ── Step 2: Fetch primary forecasts using correct per-city offsets ─
+            log("Fetching primary forecasts (NOAA/ECMWF)...")
+            import httpx as _httpx
+            forecasts = []
+            try:
+                from data.noaa import fetch_city_forecast as _fetch_city_forecast
+                async with _httpx.AsyncClient() as _client:
+                    import asyncio as _asyncio
+                    tasks = [
+                        _fetch_city_forecast(city_cfg, city_day_offset.get(city_cfg["name"], 0), _client)
+                        for city_cfg in CITIES
+                    ]
+                    raw = await _asyncio.gather(*tasks, return_exceptions=True)
+                    for city_cfg, result in zip(CITIES, raw):
+                        if isinstance(result, dict):
+                            forecasts.append(result)
+                        else:
+                            log(f"Forecast failed for {city_cfg['name']}: {result}", "WARN")
                 scan_result["cities_scanned"] = len(forecasts)
                 log(f"Primary forecasts: {len(forecasts)} cities")
             except Exception as e:
@@ -180,23 +229,24 @@ async def run_scan() -> dict:
 
             forecast_map = {f["city"]: f for f in forecasts}
 
-            # ── Step 2: Fetch GFS + ECMWF validators (serialized) ─────────────
+            # ── Step 3: Fetch GFS + ECMWF validators with correct offsets ──────
             log("Fetching GFS + ECMWF validator forecasts...")
             validator_map: dict[str, dict] = {}
             for i, city_cfg in enumerate(CITIES):
                 if i > 0:
                     await asyncio.sleep(0.5)
+                offset = city_day_offset.get(city_cfg["name"], 0)
                 try:
-                    validators = await fetch_validator_forecasts(city_cfg, day_offset=0)
+                    validators = await fetch_validator_forecasts(city_cfg, day_offset=offset)
                     validator_map[city_cfg["name"]] = validators
                     gfs_val = f"{validators['gfs']:.1f}" if validators['gfs'] is not None else "N/A"
                     ecmwf_val = f"{validators['ecmwf']:.1f}" if validators['ecmwf'] is not None else "N/A"
-                    log(f"Validators {city_cfg['name']}: GFS={gfs_val} ECMWF={ecmwf_val}")
+                    log(f"Validators {city_cfg['name']} (offset={offset}): GFS={gfs_val} ECMWF={ecmwf_val}")
                 except Exception as e:
                     log(f"Validator fetch failed for {city_cfg['name']}: {e}", "WARN")
                     validator_map[city_cfg["name"]] = {"gfs": None, "ecmwf": None}
 
-            # ── Step 3: Settle open positions ─────────────────────────────────
+            # ── Step 4: Settle open positions ─────────────────────────────────
             open_positions = await get_open_positions(session)
             log(f"Open positions: {len(open_positions)}")
 
@@ -248,16 +298,6 @@ async def run_scan() -> dict:
                     trade.noaa_forecast_high, actual_high, trade.noaa_sigma,
                     market_date=trade.market_date,
                 )
-
-            # ── Step 4: Fetch Polymarket prices ───────────────────────────────
-            log("Fetching Polymarket prices...")
-            try:
-                market_map = await build_market_map(city_names, TEMP_THRESHOLDS_F + TEMP_THRESHOLDS_C)
-                log(f"Polymarket: {len(market_map)} city/threshold markets")
-            except Exception as e:
-                log(f"Polymarket fetch failed: {e}", "WARN")
-                scan_result["errors"].append(f"Polymarket: {e}")
-                market_map = {}
 
             # ── Step 5: Evaluate signals ──────────────────────────────────────
             open_after_settle = await get_open_positions(session)
