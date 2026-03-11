@@ -1,7 +1,7 @@
 # backend/core/signals.py
 import logging
 import math
-from datetime import datetime, date, timezone
+from datetime import datetime, date
 from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
@@ -50,6 +50,7 @@ def evaluate_signal(
     threshold: float,
     noaa_prob: float,
     market_yes_price: float,
+    volume: float,
     confidence: float,
     direction: str,
     bankroll: float,
@@ -76,12 +77,11 @@ def evaluate_signal(
     2. Buffer filter — forecast must clear threshold by min margin
     Then confidence/sizing modifiers:
     3. Core filters — edge, confidence, volume, price bounds, crowd conviction
-    4. Multi-model consensus — affects sizing, not a hard veto unless all disagree
-    5. Early window boost — slightly relaxes confidence, boosts sizing
-    6. Re-entry rules — escalating EV requirement, cooldown, crowd move check
+    3. Multi-model consensus — affects sizing, not a hard veto unless all disagree
+    4. Early window boost — slightly relaxes confidence, boosts sizing
+    5. Re-entry rules — escalating EV requirement, cooldown, crowd move check
     """
     cfg = BOT_CONFIG
-    min_buffer = cfg["min_buffer_c"] if is_celsius else cfg["min_buffer_f"]
 
     entry_price = market_yes_price if direction == "YES" else (1 - market_yes_price)
     edge = abs(noaa_prob - market_yes_price)
@@ -99,21 +99,7 @@ def evaluate_signal(
                 f"— cannot bet NO"
             ), {}
 
-    # ── HARD GATE 2: Buffer filter ────────────────────────────────────────────
-    if primary_forecast is not None:
-        if direction == "YES":
-            buffer = primary_forecast - threshold
-        else:
-            buffer = threshold - primary_forecast
-
-        unit = "°C" if is_celsius else "°F"
-        if buffer < min_buffer:
-            return False, (
-                f"Buffer {buffer:.1f}{unit} < min {min_buffer}{unit} "
-                f"(forecast={primary_forecast:.1f}, threshold={threshold})"
-            ), {}
-
-    # ── Filter 3: Minimum edge ────────────────────────────────────────────────
+    # ── Filter 2: Minimum edge ────────────────────────────────────────────────
     effective_min_edge = cfg["min_edge"]
     if entry_number > 1:
         effective_min_edge = cfg["min_edge"] + cfg["reentry_min_edge_premium"]
@@ -121,7 +107,7 @@ def evaluate_signal(
     if edge < effective_min_edge:
         return False, f"Edge {edge:.1%} < min {effective_min_edge:.1%}", {}
 
-    # ── Filter 4: Confidence ──────────────────────────────────────────────────
+    # ── Filter 3: Confidence ──────────────────────────────────────────────────
     effective_min_confidence = cfg["min_confidence"]
     if is_early_window:
         effective_min_confidence = max(0.50, cfg["min_confidence"] - cfg["early_window_confidence_boost"])
@@ -129,24 +115,24 @@ def evaluate_signal(
     if confidence < effective_min_confidence:
         return False, f"Confidence {confidence:.1%} < min {effective_min_confidence:.1%}", {}
 
-    # ── Filter 5: Price bounds ────────────────────────────────────────────────
+    # ── Filter 4: Price bounds ────────────────────────────────────────────────
     if direction == "YES" and market_yes_price > cfg["max_yes_price"]:
         return False, f"YES price {market_yes_price:.2f} > max {cfg['max_yes_price']:.2f}", {}
     if direction == "NO" and market_yes_price < cfg["min_no_price"]:
         return False, f"NO side: YES price {market_yes_price:.2f} < floor {cfg['min_no_price']:.2f}", {}
 
-    # ── Filter 6: Crowd conviction ────────────────────────────────────────────
+    # ── Filter 5: Crowd conviction ────────────────────────────────────────────
     if direction == "NO" and market_yes_price > cfg["max_yes_price_for_no"]:
         return False, (
             f"Crowd conviction too high: YES at {market_yes_price:.2f} > "
             f"{cfg['max_yes_price_for_no']:.2f} — skipping NO"
         ), {}
 
-    # ── Filter 7: One position per city (unless re-entry enabled) ────────────
+    # ── Filter 6: One position per city (unless re-entry enabled) ────────────
     if city in open_city_positions and entry_number == 1:
         return False, f"Already have open position in {city}", {}
 
-    # ── Filter 8: Bankroll floor ──────────────────────────────────────────────
+    # ── Filter 7: Bankroll floor ──────────────────────────────────────────────
     if bankroll < cfg["bankroll_floor"]:
         return False, f"Bankroll ${bankroll:.2f} below floor ${cfg['bankroll_floor']:.2f}", {}
 
@@ -342,7 +328,7 @@ async def settle_trade(
 
     trade.status = status
     trade.actual_high_f = actual_high_f
-    trade.resolved_at = datetime.now(timezone.utc)
+    trade.resolved_at = datetime.utcnow()
     trade.gross_pnl = gross_pnl
     trade.fees_usd = fees
     trade.net_pnl = net_pnl

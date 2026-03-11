@@ -23,17 +23,15 @@ BOT_CONFIG = {
     # --- Core filters (HARD — no override) ---
     "min_edge": float(os.getenv("MIN_EDGE", "0.08")),
     "min_confidence": float(os.getenv("MIN_CONFIDENCE", "0.68")),
-    "min_event_volume":  float(os.getenv("MIN_EVENT_VOLUME",  "30000")),
-    "min_bucket_volume": float(os.getenv("MIN_BUCKET_VOLUME", "5000")),
+    "min_event_volume":  float(os.getenv("MIN_EVENT_VOLUME",  "5000"))   # lowered — just confirm market exists,
+    "min_bucket_volume": float(os.getenv("MIN_BUCKET_VOLUME", "500"))    # lowered — just confirm bucket is tradeable,
 
     # --- Directional gate (HARD — no override) ---
     # YES trade only if forecast > threshold, NO trade only if forecast < threshold
     "require_directional_gate": True,
 
-    # --- Buffer filter (HARD — no override) ---
-    # Forecast must clear threshold by this margin before any trade fires
-    "min_buffer_f": 4.0,       # °F for US cities
-    "min_buffer_c": 1.5,       # °C for international cities
+    # --- Buffer filter REMOVED ---
+    # sigma + edge + confidence already handle near-threshold uncertainty
 
     # --- Multi-model consensus (confidence layer — sizing modifier) ---
     # GFS and ECMWF called via Open-Meteo as independent validators
