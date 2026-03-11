@@ -87,17 +87,22 @@ def evaluate_signal(
     edge = abs(noaa_prob - market_yes_price)
 
     # ── HARD GATE 1: Directional gate ────────────────────────────────────────
-    if primary_forecast is not None:
-        if direction == "YES" and primary_forecast < threshold:
-            return False, (
-                f"Directional gate: forecast {primary_forecast:.1f} < threshold {threshold} "
-                f"— cannot bet YES"
-            ), {}
-        if direction == "NO" and primary_forecast > threshold:
-            return False, (
-                f"Directional gate: forecast {primary_forecast:.1f} > threshold {threshold} "
-                f"— cannot bet NO"
-            ), {}
+    # Use noaa_prob (cumulative CDF), not raw forecast vs threshold.
+    # The old forecast < threshold comparison was too strict: with sigma=4.5,
+    # a forecast of 13.9°C implies P(>=14°C) ≈ 49% — a legitimate YES signal
+    # if the market only prices it at 20%. The probability-based gate correctly
+    # allows near-threshold trades while still blocking truly nonsensical ones.
+    # Thresholds: YES requires NOAA ≥ 15%, NO requires NOAA ≤ 85%.
+    MIN_DIR_PROB_YES = 0.15
+    MAX_DIR_PROB_NO  = 0.85
+    if direction == "YES" and noaa_prob < MIN_DIR_PROB_YES:
+        return False, (
+            f"Directional gate: P(>={threshold}) = {noaa_prob:.1%} too low for YES"
+        ), {}
+    if direction == "NO" and noaa_prob > MAX_DIR_PROB_NO:
+        return False, (
+            f"Directional gate: P(>={threshold}) = {noaa_prob:.1%} too high for NO"
+        ), {}
 
     # ── Filter 2: Minimum edge ────────────────────────────────────────────────
     effective_min_edge = cfg["min_edge"]
