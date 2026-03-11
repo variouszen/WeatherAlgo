@@ -20,28 +20,51 @@ DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 
 # ── Bot config ─────────────────────────────────────────────────────────────────
 BOT_CONFIG = {
-    # --- Core filters ---
+    # --- Core filters (HARD — no override) ---
     "min_edge": float(os.getenv("MIN_EDGE", "0.08")),
     "min_confidence": float(os.getenv("MIN_CONFIDENCE", "0.68")),
     "min_market_volume": float(os.getenv("MIN_VOLUME", "35000")),
 
-    # --- Multi-source consensus (NEW v2) ---
-    # Both NOAA and Open-Meteo must agree on direction
-    "require_source_consensus": True,
-    # Max spread allowed between the two forecast sources before skipping
-    # If NOAA says 72°F and Open-Meteo says 65°F, spread=7 > max=5 → skip (too uncertain)
-    "max_source_spread_f": 5.0,
-    "max_source_spread_c": 3.0,
-    # Minimum buffer between consensus forecast and threshold
-    # Prevents trading razor-edge cases like NOAA=66 on a 64°F threshold
-    "min_buffer_f": 4.0,
-    "min_buffer_c": 1.5,
-    # Skip NO trades if crowd already prices YES this high — they know it's a lock
-    # Today's lesson: NYC YES was 85¢, bot shorted it and lost. This kills that.
-    "max_yes_price_for_no": 0.80,
-    # Skip YES trades above this price (existing)
-    "max_yes_price": 0.42,
-    "min_no_price": 0.58,
+    # --- Directional gate (HARD — no override) ---
+    # YES trade only if forecast > threshold, NO trade only if forecast < threshold
+    "require_directional_gate": True,
+
+    # --- Buffer filter (HARD — no override) ---
+    # Forecast must clear threshold by this margin before any trade fires
+    "min_buffer_f": 4.0,       # °F for US cities
+    "min_buffer_c": 1.5,       # °C for international cities
+
+    # --- Multi-model consensus (confidence layer — sizing modifier) ---
+    # GFS and ECMWF called via Open-Meteo as independent validators
+    # US: NOAA primary + GFS + ECMWF validators (all 3 agree = full size)
+    # Intl: ECMWF primary + GFS validator (both agree = full size)
+    "consensus_full_size_models": 3,    # all models agree → full kelly
+    "consensus_reduced_size_models": 2, # 2/3 agree → reduced kelly
+    "consensus_reduced_factor": 0.5,    # multiply kelly by this when reduced
+    # Max raw forecast spread between any two models before skipping entirely
+    "max_model_spread_f": 6.0,
+    "max_model_spread_c": 3.0,
+
+    # --- Crowd conviction filters ---
+    "max_yes_price_for_no": 0.80,   # don't fade crowd when YES > 80¢
+    "max_yes_price": 0.42,           # don't buy YES above this
+    "min_no_price": 0.58,            # don't buy NO when YES below this
+
+    # --- Early market window (timing modifier — not a gate) ---
+    # Market age is calculated from endDate minus 2 days (approx open time)
+    "early_window_hours": 6,                # hours after market open
+    "early_window_confidence_boost": 0.08,  # lower min_confidence by this amount
+    "early_window_kelly_boost": 1.25,       # multiply kelly by this (capped at max_position_pct)
+
+    # --- Re-entry system ---
+    "reentry_enabled": True,
+    "reentry_min_edge_premium": 0.04,       # re-entry needs min_edge + this (so 12% default)
+    "reentry_min_crowd_move": 0.08,         # crowd price must have moved by this much
+    "reentry_min_ev_improvement": 0.03,     # EV must beat prior high-water mark by this
+    "reentry_cooldown_minutes": 45,         # minimum wait between entries on same city
+    "reentry_max_per_city": 2,              # max re-entries (total 3 trades per city per day)
+    "reentry_ev_hwm_cap": 0.85,             # cap high-water mark at 85% so blowouts don't block
+    "reentry_no_late_entry_hours": 3,       # no re-entry within 3h of market close
 
     # --- Position sizing ---
     "kelly_fraction": 0.25,

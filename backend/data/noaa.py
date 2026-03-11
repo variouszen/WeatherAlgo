@@ -428,7 +428,125 @@ async def get_openmeteo_forecast_high(
     return None
 
 
-async def fetch_all_cities(day_offset: int = 0) -> list[dict]:
+async def fetch_gfs_forecast_high(
+    lat: float,
+    lon: float,
+    day_offset: int = 0,
+    celsius: bool = False,
+    city_timezone: str = "UTC",
+) -> Optional[float]:
+    """
+    Fetch forecast high from GFS model via Open-Meteo.
+    Returns °F for US cities (celsius=False) or °C for international (celsius=True).
+    GFS is independent from NOAA point forecasts — genuine second signal for US cities.
+    """
+    from datetime import timedelta, date, datetime as _datetime
+    try:
+        import pytz
+        local_tz = pytz.timezone(city_timezone)
+        local_now = _datetime.now(local_tz)
+        target_date = (local_now.date() + timedelta(days=day_offset)).isoformat()
+    except Exception:
+        target_date = (date.today() + timedelta(days=day_offset)).isoformat()
+
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient() as client:
+                r = await client.get(
+                    f"{OPEN_METEO_BASE}/forecast",
+                    params={
+                        "latitude": lat,
+                        "longitude": lon,
+                        "daily": "temperature_2m_max",
+                        "temperature_unit": "celsius",
+                        "timezone": "auto",
+                        "forecast_days": max(2, day_offset + 1),
+                        "models": "gfs_seamless",
+                    },
+                    timeout=15.0,
+                )
+                if r.status_code in (429, 504):
+                    await asyncio.sleep((attempt + 1) * 3)
+                    continue
+                r.raise_for_status()
+                data = r.json()
+                dates = data.get("daily", {}).get("time", [])
+                highs = data.get("daily", {}).get("temperature_2m_max", [])
+                for d, h in zip(dates, highs):
+                    if d == target_date and h is not None:
+                        high_c = float(h)
+                        result = round(high_c, 1) if celsius else round(high_c * 9 / 5 + 32, 1)
+                        logger.info(f"[GFS] ({lat},{lon}) {target_date}: {high_c:.1f}°C → {result:.1f}{'°C' if celsius else '°F'}")
+                        return result
+                logger.warning(f"[GFS] ({lat},{lon}) {target_date}: date not found")
+                return None
+        except Exception as e:
+            logger.warning(f"[GFS] ({lat},{lon}) attempt {attempt+1} failed: {e}")
+            if attempt < 2:
+                await asyncio.sleep((attempt + 1) * 3)
+    return None
+
+
+async def fetch_ecmwf_forecast_high(
+    lat: float,
+    lon: float,
+    day_offset: int = 0,
+    celsius: bool = False,
+    city_timezone: str = "UTC",
+) -> Optional[float]:
+    """
+    Fetch forecast high from ECMWF IFS model via Open-Meteo.
+    ECMWF is generally the most accurate global model for 1-5 day forecasts.
+    Returns °F for US cities (celsius=False) or °C for international (celsius=True).
+    """
+    from datetime import timedelta, date, datetime as _datetime
+    try:
+        import pytz
+        local_tz = pytz.timezone(city_timezone)
+        local_now = _datetime.now(local_tz)
+        target_date = (local_now.date() + timedelta(days=day_offset)).isoformat()
+    except Exception:
+        target_date = (date.today() + timedelta(days=day_offset)).isoformat()
+
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient() as client:
+                r = await client.get(
+                    f"{OPEN_METEO_BASE}/forecast",
+                    params={
+                        "latitude": lat,
+                        "longitude": lon,
+                        "daily": "temperature_2m_max",
+                        "temperature_unit": "celsius",
+                        "timezone": "auto",
+                        "forecast_days": max(2, day_offset + 1),
+                        "models": "ecmwf_ifs04",
+                    },
+                    timeout=15.0,
+                )
+                if r.status_code in (429, 504):
+                    await asyncio.sleep((attempt + 1) * 3)
+                    continue
+                r.raise_for_status()
+                data = r.json()
+                dates = data.get("daily", {}).get("time", [])
+                highs = data.get("daily", {}).get("temperature_2m_max", [])
+                for d, h in zip(dates, highs):
+                    if d == target_date and h is not None:
+                        high_c = float(h)
+                        result = round(high_c, 1) if celsius else round(high_c * 9 / 5 + 32, 1)
+                        logger.info(f"[ECMWF] ({lat},{lon}) {target_date}: {high_c:.1f}°C → {result:.1f}{'°C' if celsius else '°F'}")
+                        return result
+                logger.warning(f"[ECMWF] ({lat},{lon}) {target_date}: date not found")
+                return None
+        except Exception as e:
+            logger.warning(f"[ECMWF] ({lat},{lon}) attempt {attempt+1} failed: {e}")
+            if attempt < 2:
+                await asyncio.sleep((attempt + 1) * 3)
+    return None
+
+
+
     """Fetch forecasts for all configured cities concurrently."""
     results = []
     async with httpx.AsyncClient() as client:

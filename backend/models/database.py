@@ -78,6 +78,17 @@ class Trade(Base):
     net_pnl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     bankroll_after: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
+    # Multi-model consensus tracking
+    gfs_forecast: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    ecmwf_forecast: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    models_agreed: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # how many models agreed
+    early_window: Mapped[bool] = mapped_column(Boolean, default=False)             # fired in early window
+
+    # Re-entry tracking
+    entry_number: Mapped[int] = mapped_column(Integer, default=1)                  # 1=first, 2=re-entry, etc
+    prior_entry_ev: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # EV of previous entry
+    crowd_price_at_prior: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
     # Calibration tracking
     forecast_error_f: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # actual - forecast
 

@@ -56,61 +56,181 @@ def evaluate_signal(
     bankroll: float,
     open_city_positions: list[str],
     open_yes_positions: int,
-
+    # Forecast values for directional gate + buffer
+    primary_forecast: float = None,     # NOAA for US, ECMWF for intl
+    is_celsius: bool = False,
+    # Model consensus
+    gfs_forecast: float = None,
+    ecmwf_forecast: float = None,
+    # Timing
+    is_early_window: bool = False,
+    # Re-entry
+    entry_number: int = 1,
+    prior_entry_ev: float = None,
+    crowd_price_at_prior: float = None,
 ) -> tuple[bool, str, dict]:
     """
-    Run all filters. Returns (should_trade, reason, sizing_info).
+    V2 filter stack. Returns (should_trade, reason, sizing_info).
 
-    v3: Single-source per city type.
-    - US cities: NOAA only (no OM consensus)
-    - International cities: Open-Meteo only (no fake consensus)
-    - Filters: edge, confidence, volume, price bounds, crowd conviction, bankroll floor
+    Hard gates (no override):
+    1. Directional gate — forecast must agree with trade direction
+    2. Buffer filter — forecast must clear threshold by min margin
+    Then confidence/sizing modifiers:
+    3. Core filters — edge, confidence, volume, price bounds, crowd conviction
+    4. Multi-model consensus — affects sizing, not a hard veto unless all disagree
+    5. Early window boost — slightly relaxes confidence, boosts sizing
+    6. Re-entry rules — escalating EV requirement, cooldown, crowd move check
     """
     cfg = BOT_CONFIG
+    min_buffer = cfg["min_buffer_c"] if is_celsius else cfg["min_buffer_f"]
 
     entry_price = market_yes_price if direction == "YES" else (1 - market_yes_price)
     edge = abs(noaa_prob - market_yes_price)
 
-    # ── Filter 1: Minimum edge ────────────────────────────────────────────────
-    if edge < cfg["min_edge"]:
-        return False, f"Edge {edge:.1%} < min {cfg['min_edge']:.1%}", {}
+    # ── HARD GATE 1: Directional gate ────────────────────────────────────────
+    if primary_forecast is not None:
+        if direction == "YES" and primary_forecast < threshold:
+            return False, (
+                f"Directional gate: forecast {primary_forecast:.1f} < threshold {threshold} "
+                f"— cannot bet YES"
+            ), {}
+        if direction == "NO" and primary_forecast > threshold:
+            return False, (
+                f"Directional gate: forecast {primary_forecast:.1f} > threshold {threshold} "
+                f"— cannot bet NO"
+            ), {}
 
-    # ── Filter 2: Confidence ──────────────────────────────────────────────────
-    if confidence < cfg["min_confidence"]:
-        return False, f"Confidence {confidence:.1%} < min {cfg['min_confidence']:.1%}", {}
+    # ── HARD GATE 2: Buffer filter ────────────────────────────────────────────
+    if primary_forecast is not None:
+        if direction == "YES":
+            buffer = primary_forecast - threshold
+        else:
+            buffer = threshold - primary_forecast
 
-    # ── Filter 3: Volume ──────────────────────────────────────────────────────
+        unit = "°C" if is_celsius else "°F"
+        if buffer < min_buffer:
+            return False, (
+                f"Buffer {buffer:.1f}{unit} < min {min_buffer}{unit} "
+                f"(forecast={primary_forecast:.1f}, threshold={threshold})"
+            ), {}
+
+    # ── Filter 3: Minimum edge ────────────────────────────────────────────────
+    effective_min_edge = cfg["min_edge"]
+    if entry_number > 1:
+        effective_min_edge = cfg["min_edge"] + cfg["reentry_min_edge_premium"]
+
+    if edge < effective_min_edge:
+        return False, f"Edge {edge:.1%} < min {effective_min_edge:.1%}", {}
+
+    # ── Filter 4: Confidence ──────────────────────────────────────────────────
+    effective_min_confidence = cfg["min_confidence"]
+    if is_early_window:
+        effective_min_confidence = max(0.50, cfg["min_confidence"] - cfg["early_window_confidence_boost"])
+
+    if confidence < effective_min_confidence:
+        return False, f"Confidence {confidence:.1%} < min {effective_min_confidence:.1%}", {}
+
+    # ── Filter 5: Volume ──────────────────────────────────────────────────────
     if volume < cfg["min_market_volume"]:
         return False, f"Volume ${volume:,.0f} < min ${cfg['min_market_volume']:,.0f}", {}
 
-    # ── Filter 4: Price bounds ────────────────────────────────────────────────
+    # ── Filter 6: Price bounds ────────────────────────────────────────────────
     if direction == "YES" and market_yes_price > cfg["max_yes_price"]:
         return False, f"YES price {market_yes_price:.2f} > max {cfg['max_yes_price']:.2f}", {}
     if direction == "NO" and market_yes_price < cfg["min_no_price"]:
         return False, f"NO side: YES price {market_yes_price:.2f} < floor {cfg['min_no_price']:.2f}", {}
 
-    # ── Filter 5: Don't fade a near-certain crowd (NEW) ───────────────────────
-    # If crowd is 80%+ on YES, don't take the NO regardless of NOAA sigma edge.
-    # The crowd has already priced in forecast variance. Today's NYC lesson.
+    # ── Filter 7: Crowd conviction ────────────────────────────────────────────
     if direction == "NO" and market_yes_price > cfg["max_yes_price_for_no"]:
         return False, (
             f"Crowd conviction too high: YES at {market_yes_price:.2f} > "
             f"{cfg['max_yes_price_for_no']:.2f} — skipping NO"
         ), {}
 
-    # ── Filter 6: One position per city ──────────────────────────────────────
-    if city in open_city_positions:
+    # ── Filter 8: One position per city (unless re-entry enabled) ────────────
+    if city in open_city_positions and entry_number == 1:
         return False, f"Already have open position in {city}", {}
 
-    # ── Filter 7: Bankroll floor ──────────────────────────────────────────────
+    # ── Filter 9: Bankroll floor ──────────────────────────────────────────────
     if bankroll < cfg["bankroll_floor"]:
         return False, f"Bankroll ${bankroll:.2f} below floor ${cfg['bankroll_floor']:.2f}", {}
 
-    # ── All filters passed — compute sizing ───────────────────────────────────
+    # ── Re-entry checks (only applies when entry_number > 1) ─────────────────
+    if entry_number > 1 and cfg.get("reentry_enabled"):
+        # Crowd price must have moved materially
+        if crowd_price_at_prior is not None:
+            crowd_move = abs(market_yes_price - crowd_price_at_prior)
+            if crowd_move < cfg["reentry_min_crowd_move"]:
+                return False, (
+                    f"Re-entry: crowd move {crowd_move:.2f} < min {cfg['reentry_min_crowd_move']:.2f} "
+                    f"— no material repricing"
+                ), {}
+
+        # EV must beat prior high-water mark
+        if prior_entry_ev is not None:
+            hwm = min(prior_entry_ev, cfg["reentry_ev_hwm_cap"])
+            if edge < hwm + cfg["reentry_min_ev_improvement"]:
+                return False, (
+                    f"Re-entry: edge {edge:.1%} doesn't beat HWM {hwm:.1%} + "
+                    f"premium {cfg['reentry_min_ev_improvement']:.1%}"
+                ), {}
+
+        # Cap re-entries
+        if entry_number > cfg["reentry_max_per_city"] + 1:
+            return False, f"Re-entry: max {cfg['reentry_max_per_city']} re-entries reached for {city}", {}
+
+    # ── Multi-model consensus: determine sizing factor ────────────────────────
+    models_agreed = 1  # primary source always counts
+    consensus_factor = 1.0
+
+    all_forecasts = [f for f in [primary_forecast, gfs_forecast, ecmwf_forecast] if f is not None]
+
+    if len(all_forecasts) >= 2:
+        # Count how many models agree on direction
+        if direction == "YES":
+            models_agreed = sum(1 for f in all_forecasts if f >= threshold)
+        else:
+            models_agreed = sum(1 for f in all_forecasts if f < threshold)
+
+        # Check max spread between any two models
+        max_spread = cfg["max_model_spread_c"] if is_celsius else cfg["max_model_spread_f"]
+        spread = max(all_forecasts) - min(all_forecasts)
+        if spread > max_spread:
+            return False, (
+                f"Model spread {spread:.1f}° too wide (max={max_spread}°) — "
+                f"forecasts: {[round(f,1) for f in all_forecasts]}"
+            ), {}
+
+        total_models = len(all_forecasts)
+        if models_agreed == total_models:
+            consensus_factor = 1.0        # full size
+        elif models_agreed >= 2:
+            consensus_factor = cfg["consensus_reduced_factor"]  # reduced size
+        else:
+            return False, (
+                f"No model consensus: only {models_agreed}/{total_models} agree on direction"
+            ), {}
+
+    # ── Compute sizing ────────────────────────────────────────────────────────
     sizing = compute_kelly_size(edge, entry_price, confidence, bankroll, open_yes_positions)
+
+    # Apply consensus factor
+    sizing["size_usd"] = round(sizing["size_usd"] * consensus_factor, 2)
+    sizing["size_usd"] = max(cfg["min_position_usd"], sizing["size_usd"])
+
+    # Apply early window boost
+    if is_early_window:
+        boosted = round(sizing["size_usd"] * cfg["early_window_kelly_boost"], 2)
+        max_size = bankroll * cfg["max_position_pct"]
+        sizing["size_usd"] = min(boosted, max_size)
 
     if sizing["size_usd"] > bankroll:
         return False, "Insufficient bankroll for minimum position", {}
+
+    sizing["models_agreed"] = models_agreed
+    sizing["consensus_factor"] = consensus_factor
+    sizing["early_window"] = is_early_window
+    sizing["entry_number"] = entry_number
 
     return True, "ALL_FILTERS_PASSED", sizing
 
@@ -173,6 +293,13 @@ async def open_paper_trade(
         shares=sizing["shares"],
         bankroll_at_entry=bankroll_state.balance,
         status="OPEN",
+        gfs_forecast=noaa_data.get("gfs_forecast"),
+        ecmwf_forecast=noaa_data.get("ecmwf_forecast"),
+        models_agreed=sizing.get("models_agreed"),
+        early_window=sizing.get("early_window", False),
+        entry_number=sizing.get("entry_number", 1),
+        prior_entry_ev=noaa_data.get("prior_entry_ev"),
+        crowd_price_at_prior=noaa_data.get("crowd_price_at_prior"),
     )
     session.add(trade)
 
