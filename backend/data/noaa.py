@@ -79,11 +79,14 @@ async def get_latest_observation(station_id: str, client: httpx.AsyncClient) -> 
         return None
 
 
-def parse_high_low(periods: list, day_offset: int = 0) -> dict:
+def parse_high_low(periods: list, day_offset: int = 0, target_date: str = None) -> dict:
     """
     Parse NWS periods into high/low for target day.
-    Periods alternate: [Daytime, Nighttime, Daytime, Nighttime, ...]
-    day_offset=0 → today, 1 → tomorrow
+    If target_date (YYYY-MM-DD) is provided, match by startTime date string
+    instead of positional indexing — prevents off-by-one when NWS period
+    boundaries shift between scans.
+    Falls back to positional indexing if target_date is not provided or
+    no date match is found.
     """
     day_periods   = [p for p in periods if p.get("isDaytime", False)]
     night_periods = [p for p in periods if not p.get("isDaytime", False)]
@@ -94,6 +97,33 @@ def parse_high_low(periods: list, day_offset: int = 0) -> dict:
         "detailed_forecast": "",
     }
 
+    matched = False
+
+    if target_date:
+        # Date-matched (reliable) — match startTime against target_date
+        for dp in day_periods:
+            start = dp.get("startTime", "")
+            if start[:10] == target_date:
+                result["high"] = float(dp["temperature"])
+                result["high_label"] = dp.get("name", "")
+                result["detailed_forecast"] = dp.get("detailedForecast", "")
+                matched = True
+                break
+        for np_ in night_periods:
+            start = np_.get("startTime", "")
+            if start[:10] == target_date:
+                result["low"] = float(np_["temperature"])
+                result["low_label"] = np_.get("name", "")
+                break
+        if matched:
+            return result
+        else:
+            logger.warning(
+                f"[NOAA] No period matched target_date={target_date}, "
+                f"falling back to positional index (day_offset={day_offset})"
+            )
+
+    # Positional fallback (legacy behavior)
     if len(day_periods) > day_offset:
         dp = day_periods[day_offset]
         result["high"] = float(dp["temperature"])
@@ -222,8 +252,13 @@ async def get_openmeteo_observation(lat: float, lon: float, client: httpx.AsyncC
         return None
 
 
-async def fetch_city_forecast(city: dict, day_offset: int, client: httpx.AsyncClient) -> Optional[dict]:
-    """Full pipeline for one city: uses NOAA for US, Open-Meteo for international."""
+async def fetch_city_forecast(city: dict, day_offset: int, client: httpx.AsyncClient, target_date: str = None) -> Optional[dict]:
+    """
+    Full pipeline for one city: uses NOAA for US, Open-Meteo for international.
+    target_date: optional YYYY-MM-DD string. When provided, US cities use date-matched
+    period selection instead of positional indexing — prevents off-by-one bugs when
+    NWS period boundaries shift between scans.
+    """
     lat, lon = city["lat"], city["lon"]
     is_celsius = city.get("celsius", False)
     thresholds = TEMP_THRESHOLDS_C if is_celsius else TEMP_THRESHOLDS_F
@@ -283,7 +318,13 @@ async def fetch_city_forecast(city: dict, day_offset: int, client: httpx.AsyncCl
         if not periods:
             return None
 
-        temps = parse_high_low(periods, day_offset)
+        # Compute target_date if not passed (backward compat for direct callers)
+        us_target_date = target_date
+        if us_target_date is None:
+            utc_now = datetime.now(timezone.utc)
+            us_target_date = (utc_now.date() + timedelta(days=day_offset)).strftime("%Y-%m-%d")
+
+        temps = parse_high_low(periods, day_offset, target_date=us_target_date)
         if temps["high"] is None:
             return None
 

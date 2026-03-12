@@ -306,14 +306,33 @@ async def open_paper_trade(
 async def settle_trade(
     session: AsyncSession,
     trade: Trade,
-    actual_high_f: float,
     bankroll_state: BankrollState,
+    actual_high_f: Optional[float] = None,
+    polymarket_won: Optional[bool] = None,
 ) -> dict:
+    """
+    Settle a trade. Two resolution modes:
+
+    1. Polymarket-resolved (preferred): polymarket_won is set directly from
+       which bucket won on Polymarket. actual_high_f is optional — used for
+       forecast error tracking only, not for WIN/LOSS determination.
+
+    2. Observation-resolved (legacy fallback): actual_high_f is required,
+       WIN/LOSS computed by comparing to threshold.
+    """
     cfg = BOT_CONFIG
-    won = (
-        (trade.direction == "YES" and actual_high_f >= trade.threshold_f) or
-        (trade.direction == "NO"  and actual_high_f < trade.threshold_f)
-    )
+
+    # Determine WIN/LOSS
+    if polymarket_won is not None:
+        won = polymarket_won
+    elif actual_high_f is not None:
+        won = (
+            (trade.direction == "YES" and actual_high_f >= trade.threshold_f) or
+            (trade.direction == "NO"  and actual_high_f < trade.threshold_f)
+        )
+    else:
+        logger.warning(f"[SETTLE] Cannot settle {trade.city} — no resolution source")
+        return {"status": "ERROR", "net_pnl": 0, "fees": 0, "forecast_error": None}
 
     if won:
         gross_payout = round(trade.shares * 1.0, 2)
@@ -332,10 +351,13 @@ async def settle_trade(
             bankroll_state.daily_loss_today + trade.position_size_usd, 2
         )
 
-    forecast_error = round(actual_high_f - trade.noaa_forecast_high, 2)
+    # Forecast error — only if we have a real observed high
+    forecast_error = None
+    if actual_high_f is not None:
+        forecast_error = round(actual_high_f - trade.noaa_forecast_high, 2)
 
     trade.status = status
-    trade.actual_high_f = actual_high_f
+    trade.actual_high_f = actual_high_f  # may be None if only Polymarket-resolved
     trade.resolved_at = datetime.utcnow()
     trade.gross_pnl = gross_pnl
     trade.fees_usd = fees
@@ -346,10 +368,13 @@ async def settle_trade(
     await session.flush()
 
     unit = "C" if str(trade.market_condition or "").endswith("C") else "F"
+    actual_str = f"{actual_high_f}{unit}" if actual_high_f is not None else "N/A(poly-resolved)"
+    error_str = f"{forecast_error:+.1f}{unit}" if forecast_error is not None else "pending"
+    resolution_src = "POLYMARKET" if polymarket_won is not None else "OBSERVATION"
     logger.info(
         f"[SETTLE] {trade.city} >={trade.threshold_f}{unit} {trade.direction} | "
-        f"Actual={actual_high_f}{unit} | {status} | Net P&L=${net_pnl:+.2f} | "
-        f"Forecast error={forecast_error:+.1f}{unit} | Bankroll->${bankroll_state.balance:.2f}"
+        f"Actual={actual_str} | {status} | Net P&L=${net_pnl:+.2f} | "
+        f"Forecast error={error_str} | Via={resolution_src} | Bankroll->${bankroll_state.balance:.2f}"
     )
 
     return {"status": status, "net_pnl": net_pnl, "fees": fees, "forecast_error": forecast_error}

@@ -553,3 +553,128 @@ async def build_market_map(
         logger.warning("[POLY] 0 markets — verify slug patterns and threshold config")
 
     return market_map, city_date_map
+
+
+# ── Polymarket-based settlement ──────────────────────────────────────────────
+
+async def check_event_resolution(
+    city: str,
+    market_date_str: str,
+) -> Optional[dict]:
+    """
+    Check if a Polymarket temperature event has fully resolved.
+
+    Re-fetches the event by slug and inspects nested market outcomePrices.
+    Resolution is confirmed when ALL bucket markets show binary prices
+    (one bucket at ~1.0, all others at ~0.0).
+
+    Returns:
+        {
+            "resolved": True,
+            "winning_bucket_low": float,   # lower bound of winning bucket
+            "winning_bucket_high": float|None,  # upper bound (None = open-upper)
+            "winning_label": str,
+            "estimated_high": float,       # midpoint of winning bucket, or low if open-upper
+        }
+        or {"resolved": False} if not yet resolved
+        or None on fetch failure
+    """
+    try:
+        target_date = datetime.strptime(market_date_str, "%Y-%m-%d").date()
+    except Exception:
+        logger.warning(f"[POLY-RESOLVE] Invalid market_date_str: {market_date_str}")
+        return None
+
+    slug = build_slug(city, target_date)
+    if not slug:
+        return None
+
+    url = f"{GAMMA_API_BASE}/events/slug/{slug}"
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.get(url, headers=HEADERS, timeout=15.0)
+            if r.status_code != 200:
+                logger.debug(f"[POLY-RESOLVE] HTTP {r.status_code} for {slug}")
+                return None
+
+            event = r.json()
+            if isinstance(event, list):
+                event = event[0] if event else {}
+    except Exception as e:
+        logger.warning(f"[POLY-RESOLVE] Fetch failed for {slug}: {e}")
+        return None
+
+    nested_markets = event.get("markets", [])
+    if not nested_markets:
+        return None
+
+    # Check if all markets have resolved (binary prices)
+    winning_bucket = None
+    all_resolved = True
+
+    for nm in nested_markets:
+        label = (
+            nm.get("groupItemTitle") or nm.get("question") or nm.get("title") or ""
+        ).strip()
+
+        # Parse outcomePrices — could be JSON string or list
+        outcome_prices = _parse_json_field(nm.get("outcomePrices", "[]"))
+        if not outcome_prices or len(outcome_prices) < 2:
+            all_resolved = False
+            break
+
+        try:
+            yes_price = float(outcome_prices[0])
+        except (ValueError, TypeError):
+            all_resolved = False
+            break
+
+        # Binary = price is near 0 or near 1 (within tolerance for rounding)
+        is_binary = yes_price > 0.95 or yes_price < 0.05
+        if not is_binary:
+            all_resolved = False
+            break
+
+        # This bucket won
+        if yes_price > 0.95:
+            parsed = parse_bucket_range(label)
+            if parsed is not None:
+                winning_bucket = {
+                    "low": parsed[0],
+                    "high": parsed[1],
+                    "label": label,
+                }
+
+    if not all_resolved:
+        return {"resolved": False}
+
+    if winning_bucket is None:
+        logger.warning(f"[POLY-RESOLVE] All binary but no winning bucket found for {slug}")
+        return {"resolved": False}
+
+    # Estimate actual high from winning bucket range
+    low = winning_bucket["low"]
+    high = winning_bucket["high"]
+    if low == float("-inf"):
+        # Open-lower bucket — use high as upper bound estimate
+        estimated = high - 1.0 if high is not None else None
+    elif high is None:
+        # Open-upper bucket — we only know temp >= low
+        estimated = low + 2.0  # conservative estimate slightly above lower bound
+    else:
+        # Bounded range — use midpoint
+        estimated = (low + high) / 2.0
+
+    logger.info(
+        f"[POLY-RESOLVE] ✓ {city}/{market_date_str} RESOLVED | "
+        f"Winner: '{winning_bucket['label']}' (low={low}, high={high}) | "
+        f"Estimated high: {estimated}"
+    )
+
+    return {
+        "resolved": True,
+        "winning_bucket_low": low,
+        "winning_bucket_high": high,
+        "winning_label": winning_bucket["label"],
+        "estimated_high": estimated,
+    }

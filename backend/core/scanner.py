@@ -204,7 +204,12 @@ async def run_scan() -> dict:
                 async with _httpx.AsyncClient() as _client:
                     import asyncio as _asyncio
                     tasks = [
-                        _fetch_city_forecast(city_cfg, city_day_offset.get(city_cfg["name"], 0), _client)
+                        _fetch_city_forecast(
+                            city_cfg,
+                            city_day_offset.get(city_cfg["name"], 0),
+                            _client,
+                            target_date=city_date_map.get(city_cfg["name"]),
+                        )
                         for city_cfg in CITIES
                     ]
                     raw = await _asyncio.gather(*tasks, return_exceptions=True)
@@ -239,17 +244,21 @@ async def run_scan() -> dict:
                     log(f"Validator fetch failed for {city_cfg['name']}: {e}", "WARN")
                     validator_map[city_cfg["name"]] = {"gfs": None, "ecmwf": None}
 
-            # ── Step 4: Settle open positions ─────────────────────────────────
+            # ── Step 4: Settle open positions via Polymarket resolution ────
             open_positions = await get_open_positions(session)
             log(f"Open positions: {len(open_positions)}")
 
-            now_utc = datetime.now(timezone.utc)
-            today = now_utc.date()
-            settlement_hour_utc = 20
+            from data.polymarket import check_event_resolution
 
             for trade in open_positions:
-                # Use market_date (the temp date being bet on) for settlement.
-                # Fall back to opened_at.date() only if market_date is missing.
+                city_cfg = city_by_name.get(trade.city)
+                if not city_cfg:
+                    continue
+
+                is_celsius = city_cfg.get("celsius", False)
+                unit = "C" if is_celsius else "F"
+
+                # Skip future-dated trades — Polymarket can't have resolved yet
                 if trade.market_date:
                     try:
                         trade_date = datetime.strptime(trade.market_date, "%Y-%m-%d").date()
@@ -258,39 +267,73 @@ async def run_scan() -> dict:
                 else:
                     trade_date = trade.opened_at.date()
 
+                now_utc = datetime.now(timezone.utc)
+                today = now_utc.date()
                 if trade_date > today:
                     continue
-                if trade_date == today and now_utc.hour < settlement_hour_utc:
+
+                # ── Primary: check Polymarket for resolution ──────────────
+                resolution = await check_event_resolution(
+                    city=trade.city,
+                    market_date_str=trade.market_date or trade_date.isoformat(),
+                )
+
+                if resolution is None or not resolution.get("resolved", False):
+                    if trade_date < today:
+                        log(f"STALE? {trade.city} >={trade.threshold_f}{unit} | "
+                            f"Date={trade_date} | Polymarket not resolved yet — keeping open", "WARN")
                     continue
 
-                city_cfg = city_by_name.get(trade.city)
-                if not city_cfg:
-                    continue
+                # ── Determine WIN/LOSS from winning bucket ────────────────
+                winning_low = resolution["winning_bucket_low"]
+                # If winning bucket starts at or above threshold → actual high >= threshold → YES wins
+                polymarket_won = (
+                    (trade.direction == "YES" and winning_low >= trade.threshold_f) or
+                    (trade.direction == "NO"  and winning_low < trade.threshold_f)
+                )
 
-                is_celsius = city_cfg.get("celsius", False)
-                unit = "C" if is_celsius else "F"
+                # ── Fetch observed high for calibration (best-effort) ─────
+                actual_high = None
+                try:
+                    if is_celsius:
+                        actual_high = await get_openmeteo_daily_high(
+                            city_cfg["lat"], city_cfg["lon"], trade_date
+                        )
+                    else:
+                        actual_high = await get_nws_daily_high(
+                            city_cfg["station"], trade_date
+                        )
+                except Exception as e:
+                    log(f"Observation fetch failed for {trade.city} (non-fatal): {e}", "WARN")
 
-                if is_celsius:
-                    actual_high = await get_openmeteo_daily_high(city_cfg["lat"], city_cfg["lon"], trade_date)
-                else:
-                    actual_high = await get_nws_daily_high(city_cfg["station"], trade_date)
-
+                # If no observation available, use Polymarket bucket estimate
                 if actual_high is None:
-                    log(f"No daily high for {trade.city} on {trade_date} — keeping open", "WARN")
-                    continue
+                    actual_high = resolution.get("estimated_high")
+                    if actual_high is not None:
+                        log(f"Using Polymarket estimate for {trade.city}: {actual_high}{unit} "
+                            f"(from bucket '{resolution['winning_label']}')")
 
-                result = await settle_trade(session, trade, actual_high, bankroll_state)
+                # ── Settle ────────────────────────────────────────────────
+                result = await settle_trade(
+                    session, trade, bankroll_state,
+                    actual_high_f=actual_high,
+                    polymarket_won=polymarket_won,
+                )
                 scan_result["trades_settled"] += 1
                 log(
                     f"SETTLED {trade.city} >={trade.threshold_f}{unit} | "
-                    f"Date={trade_date} | Actual={actual_high}{unit} | "
+                    f"Date={trade_date} | Winner='{resolution['winning_label']}' | "
+                    f"Actual={actual_high if actual_high is not None else 'N/A'}{unit} | "
                     f"{result['status']} | Net=${result['net_pnl']:+.2f}"
                 )
-                await log_calibration(
-                    session, trade.city, city_cfg["station"],
-                    trade.noaa_forecast_high, actual_high, trade.noaa_sigma,
-                    market_date=trade.market_date,
-                )
+
+                # ── Calibration data (always log if we have observation) ──
+                if actual_high is not None:
+                    await log_calibration(
+                        session, trade.city, city_cfg["station"],
+                        trade.noaa_forecast_high, actual_high, trade.noaa_sigma,
+                        market_date=trade.market_date,
+                    )
 
             # ── Step 5: Evaluate signals ──────────────────────────────────────
             open_after_settle = await get_open_positions(session)
