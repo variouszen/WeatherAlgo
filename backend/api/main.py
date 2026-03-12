@@ -248,7 +248,7 @@ async def delete_specific_trades():
     One-time cleanup — delete specific bad trades by ID and refund bankroll.
     Hardcoded to IDs: 78, 80, 81, 82, 83
     """
-    trade_ids = [84, 85, 86, 88]
+    trade_ids = [89]
     async with AsyncSessionLocal() as session:
         async with session.begin():
             bankroll_state = await get_bankroll(session)
