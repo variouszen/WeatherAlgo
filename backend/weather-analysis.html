@@ -465,8 +465,7 @@ function buildModelAccuracy(closed) {
   const intlCities = new Set(['London', 'Seoul', 'Paris', 'Toronto']);
   // NOAA = noaa_forecast_high for US cities only
   // ECMWF = noaa_forecast_high for intl cities (it's the primary source)
-  // GFS = gfs_forecast for all cities
-  const models = { NOAA: [], ECMWF: [], GFS: [] };
+  // GFS = gfs_forecast — split by unit system to avoid mixing °F and °C
   const modelsUS = { NOAA: [], GFS: [] };
   const modelsIntl = { ECMWF: [], GFS: [] };
 
@@ -477,26 +476,23 @@ function buildModelAccuracy(closed) {
     if (t.noaa_forecast_high != null) {
       const err = Math.abs(t.actual_high_f - t.noaa_forecast_high);
       if (isIntl) {
-        models.ECMWF.push(err);
         modelsIntl.ECMWF.push(err);
       } else {
-        models.NOAA.push(err);
         modelsUS.NOAA.push(err);
       }
     }
     if (t.gfs_forecast != null) {
       const err = Math.abs(t.actual_high_f - t.gfs_forecast);
-      models.GFS.push(err);
       if (isIntl) modelsIntl.GFS.push(err);
       else modelsUS.GFS.push(err);
     }
   });
 
   const mae = arr => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null;
-  const labels = ['All Cities', 'US Only', 'International'];
-  const noaaData = [mae(models.NOAA), mae(modelsUS.NOAA), null];
-  const ecmwfData = [mae(models.ECMWF), null, mae(modelsIntl.ECMWF)];
-  const gfsData = [mae(models.GFS), mae(modelsUS.GFS), mae(modelsIntl.GFS)];
+  const labels = ['US (°F)', 'Intl (°C)'];
+  const noaaData = [mae(modelsUS.NOAA), null];
+  const ecmwfData = [null, mae(modelsIntl.ECMWF)];
+  const gfsData = [mae(modelsUS.GFS), mae(modelsIntl.GFS)];
 
   new Chart(document.getElementById('modelAccuracy'), {
     type: 'bar',
@@ -732,8 +728,8 @@ function buildForecastActual(closed) {
   // Detail table — split into NOAA / ECMWF / GFS columns
   const table = document.getElementById('detailTable');
 
-  // Compute footer averages
-  let noaaErrs = [], ecmwfErrs = [], gfsErrs = [];
+  // Compute footer averages — split by unit system
+  let noaaErrs = [], ecmwfErrs = [], gfsErrsUS = [], gfsErrsIntl = [];
   closed.forEach(t => {
     if (t.actual_high_f == null) return;
     const isIntl = intlCities.has(t.city);
@@ -743,7 +739,9 @@ function buildForecastActual(closed) {
       else noaaErrs.push(err);
     }
     if (t.gfs_forecast != null) {
-      gfsErrs.push(Math.abs(t.actual_high_f - t.gfs_forecast));
+      const err = Math.abs(t.actual_high_f - t.gfs_forecast);
+      if (isIntl) gfsErrsIntl.push(err);
+      else gfsErrsUS.push(err);
     }
   });
   const avgOrDash = arr => arr.length ? (arr.reduce((a,b)=>a+b,0)/arr.length).toFixed(1) + '°' : '—';
@@ -782,13 +780,22 @@ function buildForecastActual(closed) {
       <td class="${(t.net_pnl||0) >= 0 ? 'positive' : 'negative'}">$${(t.net_pnl||0) >= 0 ? '+' : ''}${(t.net_pnl||0).toFixed(2)}</td>
     </tr>`;
   }).join('') + `</tbody>
-  <tfoot><tr style="border-top:2px solid var(--border);font-weight:600;">
-    <td></td><td colspan="5" style="color:var(--text2);">AVG ABSOLUTE ERROR</td>
+  <tfoot>
+  <tr style="border-top:2px solid var(--border);font-weight:600;">
+    <td></td><td colspan="5" style="color:var(--text2);">MAE — US (°F)</td>
     <td style="color:#3b82f6">${avgOrDash(noaaErrs)}</td>
-    <td style="color:#a855f7">${avgOrDash(ecmwfErrs)}</td>
-    <td style="color:#14b8a6">${avgOrDash(gfsErrs)}</td>
+    <td style="color:var(--text2);">—</td>
+    <td style="color:#14b8a6">${avgOrDash(gfsErrsUS)}</td>
     <td colspan="4"></td>
-  </tr></tfoot>`;
+  </tr>
+  <tr style="font-weight:600;">
+    <td></td><td colspan="5" style="color:var(--text2);">MAE — Intl (°C)</td>
+    <td style="color:var(--text2);">—</td>
+    <td style="color:#a855f7">${avgOrDash(ecmwfErrs)}</td>
+    <td style="color:#14b8a6">${avgOrDash(gfsErrsIntl)}</td>
+    <td colspan="4"></td>
+  </tr>
+  </tfoot>`;
 }
 
 // ── Toggle + Init ──────────────────────────────────────────────
