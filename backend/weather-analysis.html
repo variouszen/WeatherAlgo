@@ -267,6 +267,7 @@ function render(trades) {
     <div class="panels">
       <div class="panel">
         <h2>Model Accuracy Comparison <span class="badge" style="background:var(--green-dim);color:var(--green);">MAE °</span></h2>
+        <div style="font-size:11px;color:var(--text2);margin:-10px 0 12px;">NOAA = US primary · ECMWF = International primary · GFS = consensus validator</div>
         <canvas id="modelAccuracy" height="260"></canvas>
       </div>
       <div class="panel">
@@ -291,6 +292,7 @@ function render(trades) {
     <div class="panels">
       <div class="panel full">
         <h2>Forecast vs Actual — All Models</h2>
+        <div style="font-size:11px;color:var(--text2);margin:-10px 0 12px;"><span style="color:#3b82f6">■</span> NOAA (US) · <span style="color:#a855f7">■</span> ECMWF (Intl) · <span style="color:#14b8a6">■</span> GFS (All) · <span style="color:#f59e0b">■</span> Actual</div>
         <canvas id="forecastActual" height="180"></canvas>
         <div class="detail-table-wrap">
           <table class="detail-table" id="detailTable"></table>
@@ -450,44 +452,50 @@ function buildErrorDist(closed) {
 
 // ── Panel: Model accuracy ──────────────────────────────────────
 function buildModelAccuracy(closed) {
-  const models = { NOAA: [], GFS: [], ECMWF: [] };
-  const modelsUS = { NOAA: [], GFS: [], ECMWF: [] };
-  const modelsIntl = { NOAA: [], GFS: [], ECMWF: [] };
   const intlCities = new Set(['London', 'Seoul', 'Paris', 'Toronto']);
+  // NOAA = noaa_forecast_high for US cities only
+  // ECMWF = noaa_forecast_high for intl cities (it's the primary source)
+  // GFS = gfs_forecast for all cities
+  const models = { NOAA: [], ECMWF: [], GFS: [] };
+  const modelsUS = { NOAA: [], GFS: [] };
+  const modelsIntl = { ECMWF: [], GFS: [] };
 
   closed.forEach(t => {
     if (t.actual_high_f == null) return;
     const isIntl = intlCities.has(t.city);
-    const bucket = isIntl ? modelsIntl : modelsUS;
 
     if (t.noaa_forecast_high != null) {
       const err = Math.abs(t.actual_high_f - t.noaa_forecast_high);
-      models.NOAA.push(err); bucket.NOAA.push(err);
+      if (isIntl) {
+        models.ECMWF.push(err);
+        modelsIntl.ECMWF.push(err);
+      } else {
+        models.NOAA.push(err);
+        modelsUS.NOAA.push(err);
+      }
     }
     if (t.gfs_forecast != null) {
       const err = Math.abs(t.actual_high_f - t.gfs_forecast);
-      models.GFS.push(err); bucket.GFS.push(err);
-    }
-    if (t.ecmwf_forecast != null) {
-      const err = Math.abs(t.actual_high_f - t.ecmwf_forecast);
-      models.ECMWF.push(err); bucket.ECMWF.push(err);
+      models.GFS.push(err);
+      if (isIntl) modelsIntl.GFS.push(err);
+      else modelsUS.GFS.push(err);
     }
   });
 
   const mae = arr => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null;
   const labels = ['All Cities', 'US Only', 'International'];
-  const noaaData = [mae(models.NOAA), mae(modelsUS.NOAA), mae(modelsIntl.NOAA)];
+  const noaaData = [mae(models.NOAA), mae(modelsUS.NOAA), null];
+  const ecmwfData = [mae(models.ECMWF), null, mae(modelsIntl.ECMWF)];
   const gfsData = [mae(models.GFS), mae(modelsUS.GFS), mae(modelsIntl.GFS)];
-  const ecmwfData = [mae(models.ECMWF), mae(modelsUS.ECMWF), mae(modelsIntl.ECMWF)];
 
   new Chart(document.getElementById('modelAccuracy'), {
     type: 'bar',
     data: {
       labels,
       datasets: [
-        { label: 'NOAA/Primary', data: noaaData, backgroundColor: 'rgba(59,130,246,0.7)', borderRadius: 4 },
-        { label: 'GFS', data: gfsData, backgroundColor: 'rgba(20,184,166,0.7)', borderRadius: 4 },
+        { label: 'NOAA', data: noaaData, backgroundColor: 'rgba(59,130,246,0.7)', borderRadius: 4 },
         { label: 'ECMWF', data: ecmwfData, backgroundColor: 'rgba(168,85,247,0.7)', borderRadius: 4 },
+        { label: 'GFS', data: gfsData, backgroundColor: 'rgba(20,184,166,0.7)', borderRadius: 4 },
       ]
     },
     options: {
@@ -622,18 +630,25 @@ function buildThreshProx(closed) {
 
 // ── Panel: Forecast vs actual + table ──────────────────────────
 function buildForecastActual(closed) {
+  const intlCities = new Set(['London', 'Seoul', 'Paris', 'Toronto']);
   const withActual = closed.filter(t => t.actual_high_f != null);
   const labels = withActual.map(t => t.city.substring(0,3) + ' ' + (t.market_date || '').substring(5));
+
+  // Split noaa_forecast_high into correct model column per city type
+  const noaaVals = withActual.map(t => intlCities.has(t.city) ? null : t.noaa_forecast_high);
+  const ecmwfVals = withActual.map(t => intlCities.has(t.city) ? t.noaa_forecast_high : null);
+  const gfsVals = withActual.map(t => t.gfs_forecast);
+  const actualVals = withActual.map(t => t.actual_high_f);
 
   new Chart(document.getElementById('forecastActual'), {
     type: 'bar',
     data: {
       labels,
       datasets: [
-        { label: 'NOAA/Primary', data: withActual.map(t => t.noaa_forecast_high), backgroundColor: 'rgba(59,130,246,0.6)', borderRadius: 3 },
-        { label: 'GFS', data: withActual.map(t => t.gfs_forecast), backgroundColor: 'rgba(20,184,166,0.6)', borderRadius: 3 },
-        { label: 'ECMWF', data: withActual.map(t => t.ecmwf_forecast), backgroundColor: 'rgba(168,85,247,0.6)', borderRadius: 3 },
-        { label: 'Actual', data: withActual.map(t => t.actual_high_f), backgroundColor: 'rgba(245,158,11,0.8)', borderRadius: 3 },
+        { label: 'NOAA', data: noaaVals, backgroundColor: 'rgba(59,130,246,0.6)', borderRadius: 3 },
+        { label: 'ECMWF', data: ecmwfVals, backgroundColor: 'rgba(168,85,247,0.6)', borderRadius: 3 },
+        { label: 'GFS', data: gfsVals, backgroundColor: 'rgba(20,184,166,0.6)', borderRadius: 3 },
+        { label: 'Actual', data: actualVals, backgroundColor: 'rgba(245,158,11,0.8)', borderRadius: 3 },
       ]
     },
     options: {
@@ -645,11 +660,28 @@ function buildForecastActual(closed) {
     }
   });
 
-  // Detail table
+  // Detail table — split into NOAA / ECMWF / GFS columns
   const table = document.getElementById('detailTable');
+
+  // Compute footer averages
+  let noaaErrs = [], ecmwfErrs = [], gfsErrs = [];
+  closed.forEach(t => {
+    if (t.actual_high_f == null) return;
+    const isIntl = intlCities.has(t.city);
+    if (t.noaa_forecast_high != null) {
+      const err = Math.abs(t.actual_high_f - t.noaa_forecast_high);
+      if (isIntl) ecmwfErrs.push(err);
+      else noaaErrs.push(err);
+    }
+    if (t.gfs_forecast != null) {
+      gfsErrs.push(Math.abs(t.actual_high_f - t.gfs_forecast));
+    }
+  });
+  const avgOrDash = arr => arr.length ? (arr.reduce((a,b)=>a+b,0)/arr.length).toFixed(1) + '°' : '—';
+
   table.innerHTML = `<thead><tr>
     <th></th><th>City</th><th>Date</th><th>Dir</th><th>Threshold</th>
-    <th>NOAA</th><th>GFS</th><th>ECMWF</th><th>Actual</th>
+    <th style="color:#3b82f6">NOAA</th><th style="color:#a855f7">ECMWF</th><th style="color:#14b8a6">GFS</th><th>Actual</th>
     <th>Error</th><th>Result</th><th>Net P&L</th>
   </tr></thead><tbody>` + closed.map(t => {
     const flag = isFlagged(t);
@@ -658,7 +690,12 @@ function buildForecastActual(closed) {
       t.forecast_error_f > 1 ? 'chip-hot' : t.forecast_error_f < -1 ? 'chip-cold' : 'chip-neutral';
     const resultChip = t.status === 'WIN' ? 'chip-win' : 'chip-loss';
     const fmt = v => v != null ? v.toFixed(1) : '—';
-    const unit = ['London','Seoul','Paris','Toronto'].includes(t.city) ? '°C' : '°F';
+    const isIntl = intlCities.has(t.city);
+    const unit = isIntl ? '°C' : '°F';
+
+    // Route noaa_forecast_high to correct column
+    const noaaVal = isIntl ? null : t.noaa_forecast_high;
+    const ecmwfVal = isIntl ? t.noaa_forecast_high : null;
 
     return `<tr>
       <td>${flagHtml}</td>
@@ -666,15 +703,22 @@ function buildForecastActual(closed) {
       <td>${(t.market_date || '').substring(5)}</td>
       <td>${t.direction}</td>
       <td>≥${t.threshold_f}${unit}</td>
-      <td>${fmt(t.noaa_forecast_high)}</td>
+      <td>${fmt(noaaVal)}</td>
+      <td>${fmt(ecmwfVal)}</td>
       <td>${fmt(t.gfs_forecast)}</td>
-      <td>${fmt(t.ecmwf_forecast)}</td>
       <td><strong>${fmt(t.actual_high_f)}</strong></td>
       <td><span class="chip ${errChip}">${t.forecast_error_f != null ? (t.forecast_error_f > 0 ? '+' : '') + t.forecast_error_f.toFixed(1) + '°' : '—'}</span></td>
       <td><span class="chip ${resultChip}">${t.status}</span></td>
       <td class="${(t.net_pnl||0) >= 0 ? 'positive' : 'negative'}">$${(t.net_pnl||0) >= 0 ? '+' : ''}${(t.net_pnl||0).toFixed(2)}</td>
     </tr>`;
-  }).join('') + '</tbody>';
+  }).join('') + `</tbody>
+  <tfoot><tr style="border-top:2px solid var(--border);font-weight:600;">
+    <td></td><td colspan="4" style="color:var(--text2);">AVG ABSOLUTE ERROR</td>
+    <td style="color:#3b82f6">${avgOrDash(noaaErrs)}</td>
+    <td style="color:#a855f7">${avgOrDash(ecmwfErrs)}</td>
+    <td style="color:#14b8a6">${avgOrDash(gfsErrs)}</td>
+    <td colspan="4"></td>
+  </tr></tfoot>`;
 }
 
 // ── Toggle + Init ──────────────────────────────────────────────
