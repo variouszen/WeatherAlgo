@@ -3,6 +3,7 @@ import logging
 import asyncio
 import time
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from sqlalchemy.ext.asyncio import AsyncSession
 import sys, os
 
@@ -388,6 +389,23 @@ async def run_scan() -> dict:
                     continue
                 is_celsius = city_cfg_item.get("celsius", False)
                 unit = "C" if is_celsius else "F"
+
+                # ── Local-time guard: skip day-0 if past noon in city's timezone ──
+                # After noon local time, the daily high has likely occurred and
+                # the forecast no longer has edge over what the market already knows.
+                # This prevents betting on near-resolution markets with stale forecasts.
+                # Only applies to day-0 (market_date == today UTC). Day+1/+2 unaffected.
+                try:
+                    mkt_date = datetime.strptime(market_date_str, "%Y-%m-%d").date()
+                    if mkt_date == utc_today:
+                        city_tz = city_cfg_item.get("timezone", "UTC")
+                        city_local_now = datetime.now(timezone.utc).astimezone(ZoneInfo(city_tz))
+                        if city_local_now.hour >= 12:
+                            log(f"SKIP {city}/{market_date_str} | Day-0 past noon local time "
+                                f"({city_local_now.strftime('%H:%M')} {city_tz}) — forecast edge unreliable")
+                            continue
+                except Exception:
+                    pass  # If timezone lookup fails, don't block — let other filters handle it
 
                 # ── Dynamic thresholds: use what Polymarket actually offers ──
                 # Polymarket is the sole source of tradeable thresholds.
