@@ -104,6 +104,31 @@ async def serve_dashboard():
     )
 
 
+@app.get("/analysis", response_class=HTMLResponse)
+async def serve_analysis():
+    """Serve the trade analysis dashboard."""
+    import os
+    this_file = os.path.abspath(__file__)
+    api_dir = os.path.dirname(this_file)
+    backend_dir = os.path.dirname(api_dir)
+    repo_dir = os.path.dirname(backend_dir)
+
+    candidates = [
+        os.path.join(backend_dir, "weather-analysis.html"),
+        os.path.join(repo_dir, "weather-analysis.html"),
+        os.path.join(api_dir, "weather-analysis.html"),
+    ]
+    for html_path in candidates:
+        if os.path.exists(html_path):
+            with open(html_path, "r") as f:
+                return HTMLResponse(content=f.read())
+
+    return HTMLResponse(
+        content="<h1>Analysis dashboard not found</h1>",
+        status_code=404
+    )
+
+
 @app.post("/api/admin/reset-bankroll")
 async def reset_bankroll_endpoint():
     """Hard reset bankroll to STARTING_BANKROLL. Use when balance is corrupted."""

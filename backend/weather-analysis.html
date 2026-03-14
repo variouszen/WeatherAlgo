@@ -1,0 +1,694 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WeatherAlgo — Trade Analysis</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0a0e17;
+  --surface: #111827;
+  --surface2: #1a2234;
+  --border: #1e2a3a;
+  --text: #e2e8f0;
+  --text2: #94a3b8;
+  --green: #22c55e;
+  --green-dim: rgba(34,197,94,0.15);
+  --red: #ef4444;
+  --red-dim: rgba(239,68,68,0.15);
+  --blue: #3b82f6;
+  --purple: #a855f7;
+  --teal: #14b8a6;
+  --orange: #f59e0b;
+  --amber: #fbbf24;
+  --cyan: #06b6d4;
+  --gray: #64748b;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'DM Sans', sans-serif;
+  line-height: 1.5;
+  min-height: 100vh;
+}
+.mono { font-family: 'JetBrains Mono', monospace; }
+.container { max-width: 1400px; margin: 0 auto; padding: 24px 20px; }
+
+/* Header */
+.header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 28px; padding-bottom: 20px;
+  border-bottom: 1px solid var(--border);
+}
+.header h1 { font-size: 22px; font-weight: 700; letter-spacing: -0.5px; }
+.header h1 span { color: var(--cyan); }
+.header-controls { display: flex; gap: 12px; align-items: center; }
+.toggle-btn {
+  background: var(--surface2); border: 1px solid var(--border);
+  color: var(--text2); padding: 8px 14px; border-radius: 8px;
+  font-size: 13px; cursor: pointer; font-family: inherit;
+  transition: all 0.2s;
+}
+.toggle-btn:hover { border-color: var(--cyan); color: var(--text); }
+.toggle-btn.active { background: rgba(6,182,212,0.15); border-color: var(--cyan); color: var(--cyan); }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); display: inline-block; }
+.last-updated { font-size: 12px; color: var(--text2); }
+
+/* Cards grid */
+.metrics-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 24px; }
+.metric-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 20px;
+}
+.metric-card .label { font-size: 12px; color: var(--text2); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+.metric-card .value { font-family: 'JetBrains Mono', monospace; font-size: 28px; font-weight: 700; }
+.metric-card .sub { font-size: 12px; color: var(--text2); margin-top: 4px; }
+.positive { color: var(--green); }
+.negative { color: var(--red); }
+.neutral { color: var(--text2); }
+
+/* Chart panels */
+.panels { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 24px; }
+.panel {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 20px;
+}
+.panel.full { grid-column: 1 / -1; }
+.panel h2 { font-size: 14px; font-weight: 600; margin-bottom: 16px; color: var(--text); letter-spacing: -0.3px; }
+.panel h2 .badge {
+  display: inline-block; font-size: 11px; padding: 2px 8px;
+  border-radius: 4px; margin-left: 8px; font-weight: 500;
+}
+
+/* Direction cards */
+.dir-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }
+.dir-card {
+  background: var(--surface2); border-radius: 8px; padding: 14px;
+  border-left: 3px solid var(--gray);
+}
+.dir-card.yes { border-left-color: var(--green); }
+.dir-card.no { border-left-color: var(--blue); }
+.dir-card .dir-label { font-size: 13px; font-weight: 600; margin-bottom: 8px; }
+.dir-card .dir-stats { font-size: 12px; color: var(--text2); line-height: 1.8; }
+.dir-card .dir-stats strong { color: var(--text); font-family: 'JetBrains Mono', monospace; }
+
+/* Detail table */
+.detail-table-wrap { overflow-x: auto; margin-top: 16px; }
+.detail-table {
+  width: 100%; border-collapse: collapse;
+  font-size: 12px; font-family: 'JetBrains Mono', monospace;
+}
+.detail-table th {
+  text-align: left; padding: 8px 10px; color: var(--text2);
+  border-bottom: 1px solid var(--border); font-weight: 600;
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.3px;
+  white-space: nowrap;
+}
+.detail-table td {
+  padding: 7px 10px; border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.detail-table tr:hover { background: var(--surface2); }
+.flag-icon { color: var(--orange); font-size: 14px; cursor: help; }
+.chip {
+  display: inline-block; padding: 2px 6px; border-radius: 4px;
+  font-size: 11px; font-weight: 600;
+}
+.chip-win { background: var(--green-dim); color: var(--green); }
+.chip-loss { background: var(--red-dim); color: var(--red); }
+.chip-cold { background: rgba(59,130,246,0.15); color: var(--blue); }
+.chip-hot { background: rgba(245,158,11,0.15); color: var(--orange); }
+.chip-neutral { background: rgba(100,116,139,0.15); color: var(--gray); }
+
+/* Loading */
+.loading {
+  text-align: center; padding: 60px; color: var(--text2); font-size: 14px;
+}
+.loading .spinner {
+  width: 32px; height: 32px; border: 3px solid var(--border);
+  border-top-color: var(--cyan); border-radius: 50%;
+  animation: spin 0.8s linear infinite; margin: 0 auto 16px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Responsive */
+@media (max-width: 900px) {
+  .metrics-row { grid-template-columns: repeat(2, 1fr); }
+  .panels { grid-template-columns: 1fr; }
+  .dir-row { grid-template-columns: 1fr; }
+}
+@media (max-width: 500px) {
+  .metrics-row { grid-template-columns: 1fr; }
+  .header { flex-direction: column; gap: 12px; align-items: flex-start; }
+}
+</style>
+</head>
+<body>
+<div class="container" id="app">
+  <div class="loading" id="loading">
+    <div class="spinner"></div>
+    Fetching trade data...
+  </div>
+</div>
+
+<script>
+const API = window.location.origin;
+
+let allTrades = [];
+let excludeFlagged = false;
+
+async function fetchTrades() {
+  const r = await fetch(`${API}/api/trades`);
+  return await r.json();
+}
+
+function isFlagged(t) {
+  if (Math.abs(t.forecast_error_f || 0) > 8) return 'date-offset';
+  if (t.city === 'Atlanta' && t.station === 'KFTY') return 'station-bias';
+  // Premature settlement: resolved before 8PM UTC on market_date
+  if (t.resolved_at && t.market_date) {
+    const resolved = new Date(t.resolved_at);
+    const marketEnd = new Date(t.market_date + 'T20:00:00Z');
+    if (resolved < marketEnd) return 'early-settle';
+  }
+  return null;
+}
+
+function getClosedTrades(trades) {
+  let closed = trades.filter(t => t.status === 'WIN' || t.status === 'LOSS');
+  if (excludeFlagged) closed = closed.filter(t => !isFlagged(t));
+  return closed.sort((a, b) => new Date(a.resolved_at) - new Date(b.resolved_at));
+}
+
+function render(trades) {
+  const closed = getClosedTrades(trades);
+  const wins = closed.filter(t => t.status === 'WIN');
+  const losses = closed.filter(t => t.status === 'LOSS');
+  const openTrades = trades.filter(t => t.status === 'OPEN');
+
+  const totalPnl = closed.reduce((s, t) => s + (t.net_pnl || 0), 0);
+  const winRate = closed.length ? (wins.length / closed.length * 100) : 0;
+  const mae = closed.filter(t => t.forecast_error_f != null).length
+    ? closed.filter(t => t.forecast_error_f != null).reduce((s, t) => s + Math.abs(t.forecast_error_f), 0)
+      / closed.filter(t => t.forecast_error_f != null).length
+    : 0;
+  const avgWin = wins.length ? wins.reduce((s, t) => s + t.net_pnl, 0) / wins.length : 0;
+  const avgLoss = losses.length ? losses.reduce((s, t) => s + t.net_pnl, 0) / losses.length : 0;
+  const profitFactor = Math.abs(losses.reduce((s, t) => s + t.net_pnl, 0)) > 0
+    ? wins.reduce((s, t) => s + t.net_pnl, 0) / Math.abs(losses.reduce((s, t) => s + t.net_pnl, 0))
+    : 0;
+
+  document.getElementById('app').innerHTML = `
+    <div class="header">
+      <h1>Weather<span>Algo</span> — Trade Analysis</h1>
+      <div class="header-controls">
+        <span class="status-dot"></span>
+        <span class="last-updated">${closed.length} closed · ${openTrades.length} open · updated ${new Date().toLocaleTimeString()}</span>
+        <button class="toggle-btn ${excludeFlagged ? 'active' : ''}" onclick="toggleFlag()">
+          ${excludeFlagged ? '✓ ' : ''}Exclude flagged
+        </button>
+        <button class="toggle-btn" onclick="location.href='/'">← Dashboard</button>
+      </div>
+    </div>
+
+    <!-- Metrics -->
+    <div class="metrics-row">
+      <div class="metric-card">
+        <div class="label">Closed Trades</div>
+        <div class="value">${closed.length}</div>
+        <div class="sub">${wins.length}W / ${losses.length}L</div>
+      </div>
+      <div class="metric-card">
+        <div class="label">Win Rate</div>
+        <div class="value ${winRate >= 50 ? 'positive' : ''}">${winRate.toFixed(1)}%</div>
+        <div class="sub">Avg win $${avgWin.toFixed(0)} · Avg loss $${Math.abs(avgLoss).toFixed(0)}</div>
+      </div>
+      <div class="metric-card">
+        <div class="label">Net P&L</div>
+        <div class="value ${totalPnl >= 0 ? 'positive' : 'negative'}">$${totalPnl >= 0 ? '+' : ''}${totalPnl.toFixed(2)}</div>
+        <div class="sub">Profit factor: ${profitFactor.toFixed(2)}x</div>
+      </div>
+      <div class="metric-card">
+        <div class="label">Mean Forecast Error</div>
+        <div class="value">${mae.toFixed(1)}°</div>
+        <div class="sub">Absolute error across models</div>
+      </div>
+    </div>
+
+    <!-- Row 1: P&L by city + Direction -->
+    <div class="panels">
+      <div class="panel">
+        <h2>Net P&L by City</h2>
+        <canvas id="cityPnl" height="260"></canvas>
+      </div>
+      <div class="panel">
+        <h2>Direction Breakdown</h2>
+        <div id="dirCards"></div>
+        <canvas id="dirChart" height="100"></canvas>
+      </div>
+    </div>
+
+    <!-- Row 2: Equity + Edge scatter -->
+    <div class="panels">
+      <div class="panel">
+        <h2>Equity Curve</h2>
+        <canvas id="equity" height="240"></canvas>
+      </div>
+      <div class="panel">
+        <h2>Forecast Error Distribution</h2>
+        <canvas id="errorDist" height="240"></canvas>
+      </div>
+    </div>
+
+    <!-- Row 3: Model accuracy + City bias -->
+    <div class="panels">
+      <div class="panel">
+        <h2>Model Accuracy Comparison <span class="badge" style="background:var(--green-dim);color:var(--green);">MAE °</span></h2>
+        <canvas id="modelAccuracy" height="260"></canvas>
+      </div>
+      <div class="panel">
+        <h2>City Forecast Bias <span class="badge" style="background:rgba(245,158,11,0.15);color:var(--orange);">signed error</span></h2>
+        <canvas id="cityBias" height="260"></canvas>
+      </div>
+    </div>
+
+    <!-- Row 4: Settlement timing -->
+    <div class="panels">
+      <div class="panel">
+        <h2>Settlement Timing Audit <span class="badge" style="background:rgba(239,68,68,0.15);color:var(--red);">hours vs EOD</span></h2>
+        <canvas id="settleTiming" height="200"></canvas>
+      </div>
+      <div class="panel">
+        <h2>Threshold Proximity <span class="badge" style="background:rgba(59,130,246,0.15);color:var(--blue);">margin vs outcome</span></h2>
+        <canvas id="threshProx" height="200"></canvas>
+      </div>
+    </div>
+
+    <!-- Row 5: Full detail table -->
+    <div class="panels">
+      <div class="panel full">
+        <h2>Forecast vs Actual — All Models</h2>
+        <canvas id="forecastActual" height="180"></canvas>
+        <div class="detail-table-wrap">
+          <table class="detail-table" id="detailTable"></table>
+        </div>
+      </div>
+    </div>
+  `;
+
+  buildCityPnl(closed);
+  buildDirection(closed, wins, losses);
+  buildEquity(closed);
+  buildErrorDist(closed);
+  buildModelAccuracy(closed);
+  buildCityBias(closed);
+  buildSettleTiming(closed);
+  buildThreshProx(closed);
+  buildForecastActual(closed);
+}
+
+// ── Chart defaults ─────────────────────────────────────────────
+Chart.defaults.color = '#94a3b8';
+Chart.defaults.borderColor = '#1e2a3a';
+Chart.defaults.font.family = "'DM Sans', sans-serif";
+Chart.defaults.font.size = 11;
+Chart.defaults.plugins.legend.display = false;
+
+// ── Panel: P&L by city ────────────────────────────────────────
+function buildCityPnl(closed) {
+  const byCity = {};
+  closed.forEach(t => {
+    byCity[t.city] = (byCity[t.city] || 0) + (t.net_pnl || 0);
+  });
+  const sorted = Object.entries(byCity).sort((a, b) => b[1] - a[1]);
+  new Chart(document.getElementById('cityPnl'), {
+    type: 'bar',
+    data: {
+      labels: sorted.map(s => s[0]),
+      datasets: [{
+        data: sorted.map(s => s[1]),
+        backgroundColor: sorted.map(s => s[1] >= 0 ? 'rgba(34,197,94,0.7)' : 'rgba(239,68,68,0.7)'),
+        borderRadius: 4,
+      }]
+    },
+    options: {
+      indexAxis: 'y',
+      plugins: { tooltip: { callbacks: { label: ctx => `$${ctx.raw >= 0 ? '+' : ''}${ctx.raw.toFixed(2)}` } } },
+      scales: { x: { grid: { color: '#1e2a3a' } }, y: { grid: { display: false } } }
+    }
+  });
+}
+
+// ── Panel: Direction breakdown ─────────────────────────────────
+function buildDirection(closed, wins, losses) {
+  const dirs = { YES: { trades: 0, wins: 0, pnl: 0, edges: [] }, NO: { trades: 0, wins: 0, pnl: 0, edges: [] } };
+  closed.forEach(t => {
+    const d = dirs[t.direction] || dirs.YES;
+    d.trades++; d.pnl += (t.net_pnl || 0); d.edges.push(t.edge_pct || 0);
+    if (t.status === 'WIN') d.wins++;
+  });
+
+  document.getElementById('dirCards').innerHTML = ['YES', 'NO'].map(dir => {
+    const d = dirs[dir];
+    const wr = d.trades ? (d.wins / d.trades * 100).toFixed(0) : 0;
+    const avgEdge = d.edges.length ? (d.edges.reduce((a,b)=>a+b,0) / d.edges.length).toFixed(1) : 0;
+    return `<div class="dir-card ${dir.toLowerCase()}">
+      <div class="dir-label">${dir}</div>
+      <div class="dir-stats">
+        Trades: <strong>${d.trades}</strong> · Wins: <strong>${d.wins}</strong> (${wr}%)<br>
+        P&L: <strong class="${d.pnl >= 0 ? 'positive' : 'negative'}">$${d.pnl >= 0 ? '+' : ''}${d.pnl.toFixed(2)}</strong> · Avg edge: <strong>${avgEdge}%</strong>
+      </div>
+    </div>`;
+  }).join('');
+  document.getElementById('dirCards').style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;';
+
+  new Chart(document.getElementById('dirChart'), {
+    type: 'bar',
+    data: {
+      labels: ['YES', 'NO'],
+      datasets: [
+        { label: 'Wins', data: [dirs.YES.wins, dirs.NO.wins], backgroundColor: 'rgba(34,197,94,0.7)', borderRadius: 4 },
+        { label: 'Losses', data: [dirs.YES.trades - dirs.YES.wins, dirs.NO.trades - dirs.NO.wins], backgroundColor: 'rgba(239,68,68,0.7)', borderRadius: 4 }
+      ]
+    },
+    options: {
+      indexAxis: 'y', plugins: { legend: { display: true, position: 'bottom', labels: { boxWidth: 10 } } },
+      scales: { x: { stacked: true, grid: { color: '#1e2a3a' } }, y: { stacked: true, grid: { display: false } } }
+    }
+  });
+}
+
+// ── Panel: Equity curve ────────────────────────────────────────
+function buildEquity(closed) {
+  const startBankroll = closed.length ? closed[0].bankroll_at_entry : 2000;
+  const labels = ['Start', ...closed.map(t => t.city.substring(0,3).toUpperCase())];
+  const data = [startBankroll, ...closed.map(t => t.bankroll_after)];
+  const colors = ['#64748b', ...closed.map(t => t.status === 'WIN' ? '#22c55e' : '#ef4444')];
+
+  new Chart(document.getElementById('equity'), {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        data,
+        borderColor: '#06b6d4',
+        backgroundColor: 'rgba(6,182,212,0.1)',
+        fill: true,
+        tension: 0.3,
+        pointBackgroundColor: colors,
+        pointBorderColor: colors,
+        pointRadius: 5,
+        pointHoverRadius: 7,
+      }]
+    },
+    options: {
+      plugins: { tooltip: { callbacks: {
+        label: ctx => `$${ctx.raw.toFixed(2)}`,
+        afterLabel: (ctx) => ctx.dataIndex > 0 ? closed[ctx.dataIndex - 1].status : ''
+      }}},
+      scales: {
+        y: { grid: { color: '#1e2a3a' }, ticks: { callback: v => '$' + v } },
+        x: { grid: { display: false }, ticks: { maxRotation: 45 } }
+      }
+    }
+  });
+}
+
+// ── Panel: Forecast error distribution ─────────────────────────
+function buildErrorDist(closed) {
+  const withError = closed.filter(t => t.forecast_error_f != null)
+    .sort((a, b) => a.forecast_error_f - b.forecast_error_f);
+
+  new Chart(document.getElementById('errorDist'), {
+    type: 'bar',
+    data: {
+      labels: withError.map(t => t.city.substring(0,3).toUpperCase()),
+      datasets: [{
+        data: withError.map(t => t.forecast_error_f),
+        backgroundColor: withError.map(t =>
+          t.forecast_error_f > 0 ? 'rgba(245,158,11,0.7)' :
+          t.forecast_error_f < 0 ? 'rgba(59,130,246,0.7)' : 'rgba(100,116,139,0.5)'
+        ),
+        borderRadius: 3,
+      }]
+    },
+    options: {
+      plugins: { tooltip: { callbacks: {
+        title: ctx => withError[ctx[0].dataIndex].city + ' ' + withError[ctx[0].dataIndex].market_date,
+        label: ctx => `Error: ${ctx.raw > 0 ? '+' : ''}${ctx.raw.toFixed(1)}° | ${withError[ctx.dataIndex].status}`
+      }}},
+      scales: {
+        y: { grid: { color: '#1e2a3a' }, title: { display: true, text: 'Forecast Error (°)', color: '#64748b' } },
+        x: { grid: { display: false } }
+      }
+    }
+  });
+}
+
+// ── Panel: Model accuracy ──────────────────────────────────────
+function buildModelAccuracy(closed) {
+  const models = { NOAA: [], GFS: [], ECMWF: [] };
+  const modelsUS = { NOAA: [], GFS: [], ECMWF: [] };
+  const modelsIntl = { NOAA: [], GFS: [], ECMWF: [] };
+  const intlCities = new Set(['London', 'Seoul', 'Paris', 'Toronto']);
+
+  closed.forEach(t => {
+    if (t.actual_high_f == null) return;
+    const isIntl = intlCities.has(t.city);
+    const bucket = isIntl ? modelsIntl : modelsUS;
+
+    if (t.noaa_forecast_high != null) {
+      const err = Math.abs(t.actual_high_f - t.noaa_forecast_high);
+      models.NOAA.push(err); bucket.NOAA.push(err);
+    }
+    if (t.gfs_forecast != null) {
+      const err = Math.abs(t.actual_high_f - t.gfs_forecast);
+      models.GFS.push(err); bucket.GFS.push(err);
+    }
+    if (t.ecmwf_forecast != null) {
+      const err = Math.abs(t.actual_high_f - t.ecmwf_forecast);
+      models.ECMWF.push(err); bucket.ECMWF.push(err);
+    }
+  });
+
+  const mae = arr => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null;
+  const labels = ['All Cities', 'US Only', 'International'];
+  const noaaData = [mae(models.NOAA), mae(modelsUS.NOAA), mae(modelsIntl.NOAA)];
+  const gfsData = [mae(models.GFS), mae(modelsUS.GFS), mae(modelsIntl.GFS)];
+  const ecmwfData = [mae(models.ECMWF), mae(modelsUS.ECMWF), mae(modelsIntl.ECMWF)];
+
+  new Chart(document.getElementById('modelAccuracy'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        { label: 'NOAA/Primary', data: noaaData, backgroundColor: 'rgba(59,130,246,0.7)', borderRadius: 4 },
+        { label: 'GFS', data: gfsData, backgroundColor: 'rgba(20,184,166,0.7)', borderRadius: 4 },
+        { label: 'ECMWF', data: ecmwfData, backgroundColor: 'rgba(168,85,247,0.7)', borderRadius: 4 },
+      ]
+    },
+    options: {
+      plugins: {
+        legend: { display: true, position: 'bottom', labels: { boxWidth: 10 } },
+        tooltip: { callbacks: { label: ctx => ctx.raw != null ? `${ctx.dataset.label}: ${ctx.raw.toFixed(1)}°` : 'No data' } }
+      },
+      scales: {
+        y: { grid: { color: '#1e2a3a' }, title: { display: true, text: 'MAE (°)', color: '#64748b' } },
+        x: { grid: { display: false } }
+      }
+    }
+  });
+}
+
+// ── Panel: City bias ───────────────────────────────────────────
+function buildCityBias(closed) {
+  const byCity = {};
+  closed.forEach(t => {
+    if (t.forecast_error_f == null) return;
+    if (!byCity[t.city]) byCity[t.city] = [];
+    byCity[t.city].push(t.forecast_error_f);
+  });
+  const entries = Object.entries(byCity)
+    .map(([city, errs]) => [city, errs.reduce((a, b) => a + b, 0) / errs.length, errs.length])
+    .sort((a, b) => a[1] - b[1]);
+
+  new Chart(document.getElementById('cityBias'), {
+    type: 'bar',
+    data: {
+      labels: entries.map(e => e[0]),
+      datasets: [{
+        data: entries.map(e => e[1]),
+        backgroundColor: entries.map(e =>
+          e[1] > 0.5 ? 'rgba(245,158,11,0.7)' :
+          e[1] < -0.5 ? 'rgba(59,130,246,0.7)' : 'rgba(100,116,139,0.5)'
+        ),
+        borderRadius: 4,
+      }]
+    },
+    options: {
+      indexAxis: 'y',
+      plugins: { tooltip: { callbacks: {
+        label: ctx => {
+          const e = entries[ctx.dataIndex];
+          const dir = e[1] > 0 ? 'Model runs COLD' : 'Model runs HOT';
+          return `${e[1] > 0 ? '+' : ''}${e[1].toFixed(1)}° avg (${e[2]} trades) — ${dir}`;
+        }
+      }}},
+      scales: {
+        x: { grid: { color: '#1e2a3a' }, title: { display: true, text: '← Hot | Cold →', color: '#64748b' } },
+        y: { grid: { display: false } }
+      }
+    }
+  });
+}
+
+// ── Panel: Settlement timing ───────────────────────────────────
+function buildSettleTiming(closed) {
+  const data = closed.map(t => {
+    if (!t.resolved_at || !t.market_date) return null;
+    const resolved = new Date(t.resolved_at);
+    const eod = new Date(t.market_date + 'T23:59:59Z');
+    const hoursBeforeEod = (eod - resolved) / 3600000;
+    return { city: t.city, date: t.market_date, hours: hoursBeforeEod, status: t.status, id: t.id };
+  }).filter(Boolean);
+
+  new Chart(document.getElementById('settleTiming'), {
+    type: 'bar',
+    data: {
+      labels: data.map(d => d.city.substring(0,3) + ' #' + d.id),
+      datasets: [{
+        data: data.map(d => d.hours),
+        backgroundColor: data.map(d => d.hours > 6 ? 'rgba(239,68,68,0.7)' : d.hours > 0 ? 'rgba(245,158,11,0.7)' : 'rgba(34,197,94,0.7)'),
+        borderRadius: 3,
+      }]
+    },
+    options: {
+      plugins: { tooltip: { callbacks: {
+        title: ctx => data[ctx[0].dataIndex].city + ' ' + data[ctx[0].dataIndex].date,
+        label: ctx => {
+          const h = ctx.raw;
+          return h > 6 ? `⚠️ ${h.toFixed(1)}h before EOD — possibly premature` : `${h.toFixed(1)}h before EOD`;
+        }
+      }}},
+      scales: {
+        y: { grid: { color: '#1e2a3a' }, title: { display: true, text: 'Hours before midnight UTC', color: '#64748b' } },
+        x: { grid: { display: false }, ticks: { maxRotation: 45 } }
+      }
+    }
+  });
+}
+
+// ── Panel: Threshold proximity ─────────────────────────────────
+function buildThreshProx(closed) {
+  const data = closed.filter(t => t.actual_high_f != null).map(t => {
+    const margin = Math.abs(t.actual_high_f - t.threshold_f);
+    return { margin, status: t.status, city: t.city, threshold: t.threshold_f, actual: t.actual_high_f };
+  });
+
+  const close = data.filter(d => d.margin <= 3);
+  const far = data.filter(d => d.margin > 3);
+  const closeWr = close.length ? (close.filter(d => d.status === 'WIN').length / close.length * 100) : 0;
+  const farWr = far.length ? (far.filter(d => d.status === 'WIN').length / far.length * 100) : 0;
+
+  new Chart(document.getElementById('threshProx'), {
+    type: 'bar',
+    data: {
+      labels: ['Within 3° of threshold', 'More than 3° from threshold'],
+      datasets: [
+        { label: 'Win Rate %', data: [closeWr, farWr], backgroundColor: ['rgba(59,130,246,0.7)', 'rgba(34,197,94,0.7)'], borderRadius: 4 },
+      ]
+    },
+    options: {
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: {
+          afterLabel: (ctx) => {
+            const bucket = ctx.dataIndex === 0 ? close : far;
+            const w = bucket.filter(d => d.status === 'WIN').length;
+            return `${w}W / ${bucket.length - w}L out of ${bucket.length}`;
+          }
+        }}
+      },
+      scales: {
+        y: { grid: { color: '#1e2a3a' }, max: 100, ticks: { callback: v => v + '%' } },
+        x: { grid: { display: false } }
+      }
+    }
+  });
+}
+
+// ── Panel: Forecast vs actual + table ──────────────────────────
+function buildForecastActual(closed) {
+  const withActual = closed.filter(t => t.actual_high_f != null);
+  const labels = withActual.map(t => t.city.substring(0,3) + ' ' + (t.market_date || '').substring(5));
+
+  new Chart(document.getElementById('forecastActual'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        { label: 'NOAA/Primary', data: withActual.map(t => t.noaa_forecast_high), backgroundColor: 'rgba(59,130,246,0.6)', borderRadius: 3 },
+        { label: 'GFS', data: withActual.map(t => t.gfs_forecast), backgroundColor: 'rgba(20,184,166,0.6)', borderRadius: 3 },
+        { label: 'ECMWF', data: withActual.map(t => t.ecmwf_forecast), backgroundColor: 'rgba(168,85,247,0.6)', borderRadius: 3 },
+        { label: 'Actual', data: withActual.map(t => t.actual_high_f), backgroundColor: 'rgba(245,158,11,0.8)', borderRadius: 3 },
+      ]
+    },
+    options: {
+      plugins: { legend: { display: true, position: 'bottom', labels: { boxWidth: 10 } } },
+      scales: {
+        y: { grid: { color: '#1e2a3a' }, title: { display: true, text: 'Temperature', color: '#64748b' } },
+        x: { grid: { display: false }, ticks: { maxRotation: 45 } }
+      }
+    }
+  });
+
+  // Detail table
+  const table = document.getElementById('detailTable');
+  table.innerHTML = `<thead><tr>
+    <th></th><th>City</th><th>Date</th><th>Dir</th><th>Threshold</th>
+    <th>NOAA</th><th>GFS</th><th>ECMWF</th><th>Actual</th>
+    <th>Error</th><th>Result</th><th>Net P&L</th>
+  </tr></thead><tbody>` + closed.map(t => {
+    const flag = isFlagged(t);
+    const flagHtml = flag ? `<span class="flag-icon" title="${flag}">⚠️</span>` : '';
+    const errChip = t.forecast_error_f == null ? '' :
+      t.forecast_error_f > 1 ? 'chip-hot' : t.forecast_error_f < -1 ? 'chip-cold' : 'chip-neutral';
+    const resultChip = t.status === 'WIN' ? 'chip-win' : 'chip-loss';
+    const fmt = v => v != null ? v.toFixed(1) : '—';
+    const unit = ['London','Seoul','Paris','Toronto'].includes(t.city) ? '°C' : '°F';
+
+    return `<tr>
+      <td>${flagHtml}</td>
+      <td>${t.city}</td>
+      <td>${(t.market_date || '').substring(5)}</td>
+      <td>${t.direction}</td>
+      <td>≥${t.threshold_f}${unit}</td>
+      <td>${fmt(t.noaa_forecast_high)}</td>
+      <td>${fmt(t.gfs_forecast)}</td>
+      <td>${fmt(t.ecmwf_forecast)}</td>
+      <td><strong>${fmt(t.actual_high_f)}</strong></td>
+      <td><span class="chip ${errChip}">${t.forecast_error_f != null ? (t.forecast_error_f > 0 ? '+' : '') + t.forecast_error_f.toFixed(1) + '°' : '—'}</span></td>
+      <td><span class="chip ${resultChip}">${t.status}</span></td>
+      <td class="${(t.net_pnl||0) >= 0 ? 'positive' : 'negative'}">$${(t.net_pnl||0) >= 0 ? '+' : ''}${(t.net_pnl||0).toFixed(2)}</td>
+    </tr>`;
+  }).join('') + '</tbody>';
+}
+
+// ── Toggle + Init ──────────────────────────────────────────────
+function toggleFlag() {
+  excludeFlagged = !excludeFlagged;
+  render(allTrades);
+}
+
+fetchTrades().then(trades => {
+  allTrades = trades;
+  render(trades);
+}).catch(err => {
+  document.getElementById('app').innerHTML = `<div class="loading" style="color:var(--red)">Failed to load: ${err.message}</div>`;
+});
+</script>
+</body>
+</html>
