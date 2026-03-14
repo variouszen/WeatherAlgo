@@ -609,7 +609,19 @@ async def fetch_ecmwf_forecast_high(
                         result = round(high_c, 1) if celsius else round(high_c * 9 / 5 + 32, 1)
                         logger.info(f"[ECMWF] ({lat},{lon}) {target_date}: {high_c:.1f}°C → {result:.1f}{'°C' if celsius else '°F'}")
                         return result
-                logger.warning(f"[ECMWF] ({lat},{lon}) {target_date}: date not found")
+
+                # Diagnostic: log what dates WERE available and if target had null high
+                null_dates = [d for d, h in zip(dates, highs) if d == target_date and h is None]
+                if null_dates:
+                    logger.warning(
+                        f"[ECMWF] ({lat},{lon}) {target_date}: date found but high is NULL | "
+                        f"available dates={dates} | highs={highs}"
+                    )
+                else:
+                    logger.warning(
+                        f"[ECMWF] ({lat},{lon}) {target_date}: date not in response | "
+                        f"available dates={dates} | forecast_days={max(3, day_offset + 2)}"
+                    )
                 return None
         except Exception as e:
             logger.warning(f"[ECMWF] ({lat},{lon}) attempt {attempt+1} failed: {e}")
