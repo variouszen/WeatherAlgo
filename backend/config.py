@@ -34,10 +34,10 @@ BOT_CONFIG = {
     # sigma + edge + confidence already handle near-threshold uncertainty
 
     # --- Multi-model consensus (confidence layer — sizing modifier) ---
-    # GFS called via Open-Meteo as independent validator for all tiers
+    # GFS called via Open-Meteo as independent validator for dual-model tiers
     # US:        NOAA primary + GFS validator (2 models)
     # Europe:    ICON primary + GFS validator (2 models)
-    # East Asia: JMA primary  + GFS validator (2 models)
+    # Tokyo:     JMA single-model (no validator — best-in-class at 0.25°C error)
     "consensus_full_size_models": 2,    # all models agree → full kelly
     "consensus_reduced_size_models": 1, # only primary agrees → reduced kelly
     "consensus_reduced_factor": 0.5,    # multiply kelly by this when reduced
@@ -109,10 +109,12 @@ CITIES = [
     {"name": "London",        "lat": 51.5033,  "lon": 0.0550,    "station": "EGLC", "emoji": "🎡",  "celsius": True, "timezone": "Europe/London"},
     {"name": "Paris",         "lat": 48.8566,  "lon": 2.3522,    "station": "LFPG", "emoji": "🗼",  "celsius": True, "timezone": "Europe/Paris"},
     {"name": "Munich",        "lat": 48.1351,  "lon": 11.5820,   "station": "EDDM", "emoji": "🍺",  "celsius": True, "timezone": "Europe/Berlin"},
-    # ── East Asia (3) — JMA primary + GFS validator ───────────────────────────
-    {"name": "Seoul",         "lat": 37.4602,  "lon": 126.4407,  "station": "RKSI", "emoji": "🏮",  "celsius": True, "timezone": "Asia/Seoul",     "primary_model": "jma_seamless", "primary_label": "JMA"},
-    {"name": "Tokyo",         "lat": 35.5494,  "lon": 139.7798,  "station": "RJTT", "emoji": "🏯",  "celsius": True, "timezone": "Asia/Tokyo",     "primary_model": "jma_seamless", "primary_label": "JMA"},
-    {"name": "Shanghai",      "lat": 31.1443,  "lon": 121.8083,  "station": "ZSPD", "emoji": "🏙️", "celsius": True, "timezone": "Asia/Shanghai",  "primary_model": "jma_seamless", "primary_label": "JMA"},
+    # ── East Asia (1) — JMA single-model, no GFS validator ───────────────────
+    # JMA is best-in-class for Tokyo (0.25°C avg error). GFS adds noise (+1.3°C warm bias).
+    # Single-model status earned through data audit (Session 8, March 14 2026).
+    # Seoul/Shanghai removed: all NWP models unreliable (2.4-5.5°C errors).
+    # If re-adding Asian cities later, use ecmwf_ifs025 as primary (confirmed working).
+    {"name": "Tokyo",         "lat": 35.5494,  "lon": 139.7798,  "station": "RJTT", "emoji": "🏯",  "celsius": True, "timezone": "Asia/Tokyo",     "primary_model": "jma_seamless", "primary_label": "JMA", "single_model": True},
     # To add new regions later, add "primary_model" / "primary_label" overrides:
     #   gem_seamless (Canada), bom_access_global (Australia), ukmo_seamless (UK)
 ]

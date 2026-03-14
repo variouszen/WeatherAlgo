@@ -117,10 +117,10 @@ def _is_too_late_for_reentry(end_date_str: str) -> bool:
 async def fetch_validator_forecasts(city_cfg: dict, day_offset: int = 0) -> dict:
     """
     Fetch GFS validator forecast for a city.
-    All tiers use GFS as the independent validator:
+    Dual-model tiers use GFS as the independent validator:
       US cities: NOAA primary + GFS validator
       Europe:    ICON primary + GFS validator
-      East Asia: JMA primary  + GFS validator
+    Single-model cities (e.g. Tokyo/JMA) skip this entirely via scanner logic.
     Returns {"gfs": float|None, "icon": None}
     """
     is_celsius = city_cfg.get("celsius", False)
@@ -136,7 +136,7 @@ async def run_scan() -> dict:
     """
     Full scan cycle V3 (multi-day):
     1. Fetch Polymarket prices — today + tomorrow per city (day+2 as fallback only)
-    2. Fetch primary forecasts per city-date pair (NOAA for US, ICON for Europe, JMA for East Asia)
+    2. Fetch primary forecasts per city-date pair (NOAA for US, ICON for Europe, JMA for Tokyo)
     3. Fetch GFS validator forecasts per city-date pair
     4. Settle open positions via Polymarket resolution
     5. Evaluate signals with directional gate + consensus + timing + re-entry + city caps
@@ -255,6 +255,12 @@ async def run_scan() -> dict:
             for city_name, date_strs in city_dates.items():
                 city_cfg = city_by_name.get(city_name)
                 if not city_cfg:
+                    continue
+                # Skip GFS fetch for single-model cities (e.g. Tokyo/JMA)
+                if city_cfg.get("single_model", False):
+                    for date_str in date_strs:
+                        validator_map[(city_name, date_str)] = {"gfs": None, "icon": None}
+                    log(f"Validator SKIP {city_name} — single-model city, no GFS fetch")
                     continue
                 for date_str in date_strs:
                     if fetch_count > 0:

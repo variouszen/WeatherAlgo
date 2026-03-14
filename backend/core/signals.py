@@ -162,6 +162,10 @@ def evaluate_signal(
             return False, f"Re-entry: max {cfg['reentry_max_per_city']} re-entries reached for {city}", {}
 
     # ── Multi-model consensus: determine sizing factor ───────────────────────────
+    # Dual-model cities (US/Europe): full consensus logic — hard block if models
+    # disagree, 0.5x if reduced consensus, spread gate if models diverge.
+    # Single-model cities (Tokyo): gfs_forecast is None → len(all_forecasts)==1 →
+    # consensus block doesn't fire → consensus_factor stays 1.0 → full size.
     models_agreed = 1  # primary source always counts
     consensus_factor = 1.0
     spread_note = ""
