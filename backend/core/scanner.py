@@ -116,9 +116,10 @@ def _is_too_late_for_reentry(end_date_str: str) -> bool:
 async def fetch_validator_forecasts(city_cfg: dict, day_offset: int = 0) -> dict:
     """
     Fetch GFS validator forecast for a city.
-    International cities use ICON as primary, so only GFS is needed as validator.
-    US cities use NOAA as primary, so only GFS is needed as validator.
-    ICON can be added as a US validator later once intl accuracy is measured.
+    All tiers use GFS as the independent validator:
+      US cities: NOAA primary + GFS validator
+      Europe:    ICON primary + GFS validator
+      East Asia: JMA primary  + GFS validator
     Returns {"gfs": float|None, "icon": None}
     """
     is_celsius = city_cfg.get("celsius", False)
@@ -134,7 +135,7 @@ async def run_scan() -> dict:
     """
     Full scan cycle V3 (multi-day):
     1. Fetch Polymarket prices — today + tomorrow per city (day+2 as fallback only)
-    2. Fetch primary forecasts per city-date pair (NOAA for US, ICON for intl)
+    2. Fetch primary forecasts per city-date pair (NOAA for US, ICON for Europe, JMA for East Asia)
     3. Fetch GFS validator forecasts per city-date pair
     4. Settle open positions via Polymarket resolution
     5. Evaluate signals with directional gate + consensus + timing + re-entry + city caps
@@ -203,7 +204,7 @@ async def run_scan() -> dict:
             log(f"City-date offsets: { {f'{c}/{d}': o for (c, d), o in city_date_offset.items()} }")
 
             # ── Step 2: Fetch primary forecasts — sequential per city, shared client ─
-            log("Fetching primary forecasts (NOAA/ICON)...")
+            log("Fetching primary forecasts (NOAA/ICON/JMA)...")
             import httpx as _httpx
             from data.noaa import fetch_city_forecast as _fetch_city_forecast
             forecast_map: dict[tuple[str, str], dict] = {}  # (city, date_str) -> forecast

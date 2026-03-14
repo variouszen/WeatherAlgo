@@ -44,9 +44,11 @@ CITY_SLUGS: dict[str, str] = {
     "Boston":       "boston",
     "Philadelphia": "philadelphia",
     "London":       "london",
-    "Seoul":        "seoul",
     "Paris":        "paris",
-    "Toronto":      "toronto",
+    "Munich":       "munich",
+    "Seoul":        "seoul",
+    "Tokyo":        "tokyo",
+    "Shanghai":     "shanghai",
 }
 
 CITY_TITLE_TOKENS: dict[str, list[str]] = {
@@ -59,12 +61,14 @@ CITY_TITLE_TOKENS: dict[str, list[str]] = {
     "Boston":       ["boston"],
     "Philadelphia": ["philadelphia", "philly"],
     "London":       ["london"],
-    "Seoul":        ["seoul"],
     "Paris":        ["paris"],
-    "Toronto":      ["toronto"],
+    "Munich":       ["munich"],
+    "Seoul":        ["seoul"],
+    "Tokyo":        ["tokyo"],
+    "Shanghai":     ["shanghai"],
 }
 
-CITY_CELSIUS: set[str] = {"London", "Seoul", "Paris", "Toronto"}
+CITY_CELSIUS: set[str] = {"London", "Paris", "Munich", "Seoul", "Tokyo", "Shanghai"}
 
 SLIPPAGE_HAIRCUT = 0.02
 MIN_VALID_BUCKETS = 3

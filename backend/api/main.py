@@ -9,7 +9,7 @@ from sqlalchemy import select, func, desc
 import sys, os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import BOT_CONFIG, STARTING_BANKROLL, DRY_RUN
+from config import BOT_CONFIG, STARTING_BANKROLL, DRY_RUN, CITY_MODEL_TIER
 from models.database import (
     init_db, AsyncSessionLocal,
     Trade, BankrollState, ScanLog, CityCalibration,
@@ -401,7 +401,7 @@ async def dashboard():
         for t in settled:
             c = t.city
             if c not in city_stats:
-                city_stats[c] = {"trades": 0, "wins": 0, "pnl": 0.0, "edge_sum": 0.0}
+                city_stats[c] = {"trades": 0, "wins": 0, "pnl": 0.0, "edge_sum": 0.0, "model_tier": CITY_MODEL_TIER.get(c, "unknown")}
             city_stats[c]["trades"] += 1
             city_stats[c]["pnl"] = round(city_stats[c]["pnl"] + (t.net_pnl or 0), 2)
             city_stats[c]["edge_sum"] += t.edge_pct
@@ -499,7 +499,7 @@ async def stats_by_city():
         for t in trades:
             c = t.city
             if c not in breakdown:
-                breakdown[c] = {"city": c, "trades": 0, "wins": 0, "pnl": 0.0, "edges": []}
+                breakdown[c] = {"city": c, "model_tier": CITY_MODEL_TIER.get(c, "unknown"), "trades": 0, "wins": 0, "pnl": 0.0, "edges": []}
             breakdown[c]["trades"] += 1
             breakdown[c]["pnl"] = round(breakdown[c]["pnl"] + (t.net_pnl or 0), 2)
             breakdown[c]["edges"].append(t.edge_pct)
@@ -513,11 +513,52 @@ async def stats_by_city():
         return list(breakdown.values())
 
 
+@app.get("/api/stats/by-model")
+async def stats_by_model():
+    """Performance breakdown by forecast model tier (NOAA, ICON, JMA)."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Trade).where(Trade.status.in_(["WIN", "LOSS"]))
+        )
+        trades = result.scalars().all()
+        breakdown = {}
+        for t in trades:
+            tier = CITY_MODEL_TIER.get(t.city, "unknown")
+            if tier not in breakdown:
+                breakdown[tier] = {
+                    "model_tier": tier,
+                    "cities": set(),
+                    "trades": 0,
+                    "wins": 0,
+                    "pnl": 0.0,
+                    "edges": [],
+                    "forecast_errors": [],
+                }
+            breakdown[tier]["cities"].add(t.city)
+            breakdown[tier]["trades"] += 1
+            breakdown[tier]["pnl"] = round(breakdown[tier]["pnl"] + (t.net_pnl or 0), 2)
+            breakdown[tier]["edges"].append(t.edge_pct)
+            if t.forecast_error_f is not None:
+                breakdown[tier]["forecast_errors"].append(abs(t.forecast_error_f))
+            if t.status == "WIN":
+                breakdown[tier]["wins"] += 1
+        for tier in breakdown:
+            s = breakdown[tier]
+            s["cities"] = sorted(s["cities"])
+            s["win_rate"] = round(s["wins"] / s["trades"] * 100, 1) if s["trades"] else 0
+            s["avg_edge_pct"] = round(sum(s["edges"]) / len(s["edges"]) * 100, 1) if s["edges"] else 0
+            s["mean_abs_forecast_error"] = round(sum(s["forecast_errors"]) / len(s["forecast_errors"]), 2) if s["forecast_errors"] else None
+            del s["edges"]
+            del s["forecast_errors"]
+        return list(breakdown.values())
+
+
 def _trade_to_dict(t: Trade) -> dict:
     return {
         "id": t.id,
         "city": t.city,
         "station": t.station_id,
+        "model_tier": CITY_MODEL_TIER.get(t.city, "unknown"),
         "threshold_f": t.threshold_f,
         "direction": t.direction,
         "market_condition": t.market_condition,

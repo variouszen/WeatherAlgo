@@ -273,7 +273,7 @@ function render(trades) {
     <div class="panels">
       <div class="panel">
         <h2>Model Accuracy Comparison <span class="badge" style="background:var(--green-dim);color:var(--green);">MAE °</span></h2>
-        <div style="font-size:11px;color:var(--text2);margin:-10px 0 12px;">NOAA = US primary · ICON = International primary · GFS = consensus validator</div>
+        <div style="font-size:11px;color:var(--text2);margin:-10px 0 12px;">NOAA = US primary · ICON = Europe primary · JMA = East Asia primary · GFS = consensus validator</div>
         <canvas id="modelAccuracy" height="260"></canvas>
       </div>
       <div class="panel">
@@ -307,7 +307,7 @@ function render(trades) {
     <div class="panels">
       <div class="panel full">
         <h2>Forecast vs Actual — All Models</h2>
-        <div style="font-size:11px;color:var(--text2);margin:-10px 0 12px;"><span style="color:#3b82f6">■</span> NOAA (US) · <span style="color:#a855f7">■</span> ICON (Intl) · <span style="color:#14b8a6">■</span> GFS (All) · <span style="color:#f59e0b">■</span> Actual</div>
+        <div style="font-size:11px;color:var(--text2);margin:-10px 0 12px;"><span style="color:#3b82f6">■</span> NOAA (US) · <span style="color:#a855f7">■</span> ICON (Europe) · <span style="color:#f472b6">■</span> JMA (East Asia) · <span style="color:#14b8a6">■</span> GFS (All) · <span style="color:#f59e0b">■</span> Actual</div>
         <canvas id="forecastActual" height="180"></canvas>
         <div class="detail-table-wrap">
           <table class="detail-table" id="detailTable"></table>
@@ -468,36 +468,33 @@ function buildErrorDist(closed) {
 
 // ── Panel: Model accuracy ──────────────────────────────────────
 function buildModelAccuracy(closed) {
-  // NOAA = noaa_forecast_high for US cities only
-  // ICON = noaa_forecast_high for intl cities (it's the primary source)
-  // GFS = gfs_forecast — split by unit system to avoid mixing °F and °C
-  const modelsUS = { NOAA: [], GFS: [] };
-  const modelsIntl = { ICON: [], GFS: [] };
+  // Split by model_tier from API (NOAA / ICON / JMA)
+  // GFS is the universal validator — split by tier for fair comparison
+  const tiers = {
+    NOAA: { primary: [], gfs: [] },
+    ICON: { primary: [], gfs: [] },
+    JMA:  { primary: [], gfs: [] },
+  };
 
   closed.forEach(t => {
     if (t.actual_high_f == null) return;
-    const isIntl = isIntlTrade(t);
+    const tier = t.model_tier || (isIntlTrade(t) ? 'ICON' : 'NOAA');
+    const bucket = tiers[tier] || tiers.ICON;  // fallback for unknown
 
     if (t.noaa_forecast_high != null) {
-      const err = Math.abs(t.actual_high_f - t.noaa_forecast_high);
-      if (isIntl) {
-        modelsIntl.ICON.push(err);
-      } else {
-        modelsUS.NOAA.push(err);
-      }
+      bucket.primary.push(Math.abs(t.actual_high_f - t.noaa_forecast_high));
     }
     if (t.gfs_forecast != null) {
-      const err = Math.abs(t.actual_high_f - t.gfs_forecast);
-      if (isIntl) modelsIntl.GFS.push(err);
-      else modelsUS.GFS.push(err);
+      bucket.gfs.push(Math.abs(t.actual_high_f - t.gfs_forecast));
     }
   });
 
   const mae = arr => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null;
-  const labels = ['US (°F)', 'Intl (°C)'];
-  const noaaData = [mae(modelsUS.NOAA), null];
-  const iconData = [null, mae(modelsIntl.ICON)];
-  const gfsData = [mae(modelsUS.GFS), mae(modelsIntl.GFS)];
+  const labels = ['US (°F)', 'Europe (°C)', 'East Asia (°C)'];
+  const noaaData = [mae(tiers.NOAA.primary), null, null];
+  const iconData = [null, mae(tiers.ICON.primary), null];
+  const jmaData  = [null, null, mae(tiers.JMA.primary)];
+  const gfsData  = [mae(tiers.NOAA.gfs), mae(tiers.ICON.gfs), mae(tiers.JMA.gfs)];
 
   new Chart(document.getElementById('modelAccuracy'), {
     type: 'bar',
@@ -506,6 +503,7 @@ function buildModelAccuracy(closed) {
       datasets: [
         { label: 'NOAA', data: noaaData, backgroundColor: 'rgba(59,130,246,0.7)', borderRadius: 4 },
         { label: 'ICON', data: iconData, backgroundColor: 'rgba(168,85,247,0.7)', borderRadius: 4 },
+        { label: 'JMA', data: jmaData, backgroundColor: 'rgba(244,114,182,0.7)', borderRadius: 4 },
         { label: 'GFS', data: gfsData, backgroundColor: 'rgba(20,184,166,0.7)', borderRadius: 4 },
       ]
     },
@@ -703,10 +701,15 @@ function buildForecastActual(closed) {
   const withActual = closed.filter(t => t.actual_high_f != null);
   const labels = withActual.map(t => t.city.substring(0,3) + ' ' + (t.market_date || '').substring(5));
 
-  // Split noaa_forecast_high into correct model column per city type
-  const noaaVals = withActual.map(t => isIntlTrade(t) ? null : t.noaa_forecast_high);
-  // ICON: for intl = noaa_forecast_high (primary is ICON), for US = icon_forecast (validator)
-  const iconVals = withActual.map(t => isIntlTrade(t) ? t.noaa_forecast_high : t.icon_forecast);
+  // Route noaa_forecast_high to correct primary model column based on model_tier
+  const noaaVals = withActual.map(t => (t.model_tier || 'NOAA') === 'NOAA' ? t.noaa_forecast_high : null);
+  const iconVals = withActual.map(t => {
+    const tier = t.model_tier || (isIntlTrade(t) ? 'ICON' : 'NOAA');
+    if (tier === 'ICON') return t.noaa_forecast_high;  // ICON primary stored in noaa_forecast_high
+    if (tier === 'NOAA') return t.icon_forecast;         // ICON as validator for US
+    return null;
+  });
+  const jmaVals = withActual.map(t => (t.model_tier || '') === 'JMA' ? t.noaa_forecast_high : null);
   const gfsVals = withActual.map(t => t.gfs_forecast);
   const actualVals = withActual.map(t => t.actual_high_f);
 
@@ -717,6 +720,7 @@ function buildForecastActual(closed) {
       datasets: [
         { label: 'NOAA', data: noaaVals, backgroundColor: 'rgba(59,130,246,0.6)', borderRadius: 3 },
         { label: 'ICON', data: iconVals, backgroundColor: 'rgba(168,85,247,0.6)', borderRadius: 3 },
+        { label: 'JMA', data: jmaVals, backgroundColor: 'rgba(244,114,182,0.6)', borderRadius: 3 },
         { label: 'GFS', data: gfsVals, backgroundColor: 'rgba(20,184,166,0.6)', borderRadius: 3 },
         { label: 'Actual', data: actualVals, backgroundColor: 'rgba(245,158,11,0.8)', borderRadius: 3 },
       ]
@@ -730,30 +734,32 @@ function buildForecastActual(closed) {
     }
   });
 
-  // Detail table — split into NOAA / ICON / GFS columns
+  // Detail table — split into NOAA / ICON / JMA / GFS columns
   const table = document.getElementById('detailTable');
 
-  // Compute footer averages — split by unit system
-  let noaaErrs = [], iconErrs = [], gfsErrsUS = [], gfsErrsIntl = [];
+  // Compute footer averages — split by model tier
+  let noaaErrs = [], iconErrs = [], jmaErrs = [], gfsErrsUS = [], gfsErrsEU = [], gfsErrsAsia = [];
   closed.forEach(t => {
     if (t.actual_high_f == null) return;
-    const isIntl = isIntlTrade(t);
+    const tier = t.model_tier || (isIntlTrade(t) ? 'ICON' : 'NOAA');
     if (t.noaa_forecast_high != null) {
       const err = Math.abs(t.actual_high_f - t.noaa_forecast_high);
-      if (isIntl) iconErrs.push(err);
-      else noaaErrs.push(err);
+      if (tier === 'NOAA') noaaErrs.push(err);
+      else if (tier === 'ICON') iconErrs.push(err);
+      else if (tier === 'JMA') jmaErrs.push(err);
     }
     if (t.gfs_forecast != null) {
       const err = Math.abs(t.actual_high_f - t.gfs_forecast);
-      if (isIntl) gfsErrsIntl.push(err);
-      else gfsErrsUS.push(err);
+      if (tier === 'NOAA') gfsErrsUS.push(err);
+      else if (tier === 'ICON') gfsErrsEU.push(err);
+      else if (tier === 'JMA') gfsErrsAsia.push(err);
     }
   });
   const avgOrDash = arr => arr.length ? (arr.reduce((a,b)=>a+b,0)/arr.length).toFixed(1) + '°' : '—';
 
   table.innerHTML = `<thead><tr>
     <th></th><th>City</th><th>Date</th><th>D+</th><th>Dir</th><th>Threshold</th>
-    <th style="color:#3b82f6">NOAA</th><th style="color:#a855f7">ICON</th><th style="color:#14b8a6">GFS</th><th>Actual</th>
+    <th style="color:#3b82f6">NOAA</th><th style="color:#a855f7">ICON</th><th style="color:#f472b6">JMA</th><th style="color:#14b8a6">GFS</th><th>Actual</th>
     <th>Error</th><th>Result</th><th>Net P&L</th>
   </tr></thead><tbody>` + closed.map(t => {
     const flag = isFlagged(t);
@@ -762,13 +768,13 @@ function buildForecastActual(closed) {
       t.forecast_error_f > 1 ? 'chip-hot' : t.forecast_error_f < -1 ? 'chip-cold' : 'chip-neutral';
     const resultChip = t.status === 'WIN' ? 'chip-win' : 'chip-loss';
     const fmt = v => v != null ? v.toFixed(1) : '—';
-    const isIntl = isIntlTrade(t);
-    const unit = isIntl ? '°C' : '°F';
+    const tier = t.model_tier || (isIntlTrade(t) ? 'ICON' : 'NOAA');
+    const unit = isIntlTrade(t) ? '°C' : '°F';
 
-    // Route noaa_forecast_high to correct column
-    const noaaVal = isIntl ? null : t.noaa_forecast_high;
-    // ICON: intl primary (stored in noaa_forecast_high) or US validator (icon_forecast)
-    const iconVal = isIntl ? t.noaa_forecast_high : t.icon_forecast;
+    // Route noaa_forecast_high to the correct primary column
+    const noaaVal = tier === 'NOAA' ? t.noaa_forecast_high : null;
+    const iconVal = tier === 'ICON' ? t.noaa_forecast_high : (tier === 'NOAA' ? t.icon_forecast : null);
+    const jmaVal  = tier === 'JMA' ? t.noaa_forecast_high : null;
 
     return `<tr>
       <td>${flagHtml}</td>
@@ -779,6 +785,7 @@ function buildForecastActual(closed) {
       <td>≥${t.threshold_f}${unit}</td>
       <td>${fmt(noaaVal)}</td>
       <td>${fmt(iconVal)}</td>
+      <td>${fmt(jmaVal)}</td>
       <td>${fmt(t.gfs_forecast)}</td>
       <td><strong>${fmt(t.actual_high_f)}</strong></td>
       <td><span class="chip ${errChip}">${t.forecast_error_f != null ? (t.forecast_error_f > 0 ? '+' : '') + t.forecast_error_f.toFixed(1) + '°' : '—'}</span></td>
@@ -791,14 +798,24 @@ function buildForecastActual(closed) {
     <td></td><td colspan="5" style="color:var(--text2);">MAE — US (°F)</td>
     <td style="color:#3b82f6">${avgOrDash(noaaErrs)}</td>
     <td style="color:var(--text2);">—</td>
+    <td style="color:var(--text2);">—</td>
     <td style="color:#14b8a6">${avgOrDash(gfsErrsUS)}</td>
     <td colspan="4"></td>
   </tr>
   <tr style="font-weight:600;">
-    <td></td><td colspan="5" style="color:var(--text2);">MAE — Intl (°C)</td>
+    <td></td><td colspan="5" style="color:var(--text2);">MAE — Europe (°C)</td>
     <td style="color:var(--text2);">—</td>
     <td style="color:#a855f7">${avgOrDash(iconErrs)}</td>
-    <td style="color:#14b8a6">${avgOrDash(gfsErrsIntl)}</td>
+    <td style="color:var(--text2);">—</td>
+    <td style="color:#14b8a6">${avgOrDash(gfsErrsEU)}</td>
+    <td colspan="4"></td>
+  </tr>
+  <tr style="font-weight:600;">
+    <td></td><td colspan="5" style="color:var(--text2);">MAE — East Asia (°C)</td>
+    <td style="color:var(--text2);">—</td>
+    <td style="color:var(--text2);">—</td>
+    <td style="color:#f472b6">${avgOrDash(jmaErrs)}</td>
+    <td style="color:#14b8a6">${avgOrDash(gfsErrsAsia)}</td>
     <td colspan="4"></td>
   </tr>
   </tfoot>`;

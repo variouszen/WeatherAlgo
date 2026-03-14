@@ -34,11 +34,12 @@ BOT_CONFIG = {
     # sigma + edge + confidence already handle near-threshold uncertainty
 
     # --- Multi-model consensus (confidence layer — sizing modifier) ---
-    # GFS called via Open-Meteo as independent validator
-    # US: NOAA primary + GFS validator (2 models)
-    # Intl: ICON primary + GFS validator (2 models)
-    "consensus_full_size_models": 2,    # all models agree → full kelly (US: NOAA+GFS, Intl: ICON+GFS)
-    "consensus_reduced_size_models": 1, # only primary agrees → reduced kelly (intl GFS-fallback)
+    # GFS called via Open-Meteo as independent validator for all tiers
+    # US:        NOAA primary + GFS validator (2 models)
+    # Europe:    ICON primary + GFS validator (2 models)
+    # East Asia: JMA primary  + GFS validator (2 models)
+    "consensus_full_size_models": 2,    # all models agree → full kelly
+    "consensus_reduced_size_models": 1, # only primary agrees → reduced kelly
     "consensus_reduced_factor": 0.5,    # multiply kelly by this when reduced
     # Max raw forecast spread between any two models before skipping entirely
     "max_model_spread_f": 6.0,
@@ -97,6 +98,7 @@ INTL_DEFAULT_MODEL = "icon_seamless"
 INTL_DEFAULT_LABEL = "ICON"
 
 CITIES = [
+    # ── US (8) — NOAA primary + GFS validator ─────────────────────────────────
     {"name": "New York",      "lat": 40.7128,  "lon": -74.0060,  "station": "KLGA", "emoji": "🗽",  "celsius": False, "timezone": "America/New_York"},
     {"name": "Chicago",       "lat": 41.8781,  "lon": -87.6298,  "station": "KORD", "emoji": "🌬️", "celsius": False, "timezone": "America/Chicago"},
     {"name": "Seattle",       "lat": 47.6062,  "lon": -122.3321, "station": "KSEA", "emoji": "🌧️", "celsius": False, "timezone": "America/Los_Angeles"},
@@ -105,12 +107,27 @@ CITIES = [
     {"name": "Miami",         "lat": 25.7617,  "lon": -80.1918,  "station": "KMIA", "emoji": "🌴",  "celsius": False, "timezone": "America/New_York"},
     {"name": "Boston",        "lat": 42.3601,  "lon": -71.0589,  "station": "KBOS", "emoji": "🦞",  "celsius": False, "timezone": "America/New_York"},
     {"name": "Philadelphia",  "lat": 39.9526,  "lon": -75.1652,  "station": "KPHL", "emoji": "🔔",  "celsius": False, "timezone": "America/New_York"},
+    # ── Europe (3) — ICON primary + GFS validator ─────────────────────────────
     {"name": "London",        "lat": 51.5033,  "lon": 0.0550,    "station": "EGLC", "emoji": "🎡",  "celsius": True, "timezone": "Europe/London"},
-    {"name": "Seoul",         "lat": 37.5665,  "lon": 126.9780,  "station": "RKSS", "emoji": "🏮",  "celsius": True, "timezone": "Asia/Seoul"},
     {"name": "Paris",         "lat": 48.8566,  "lon": 2.3522,    "station": "LFPG", "emoji": "🗼",  "celsius": True, "timezone": "Europe/Paris"},
-    {"name": "Toronto",       "lat": 43.6777,  "lon": -79.6248,  "station": "CYYZ", "emoji": "🍁",  "celsius": True, "timezone": "America/Toronto"},
-    # To override a city's model later, add: "primary_model": "jma_seamless", "primary_label": "JMA"
+    {"name": "Munich",        "lat": 48.1351,  "lon": 11.5820,   "station": "EDDM", "emoji": "🍺",  "celsius": True, "timezone": "Europe/Berlin"},
+    # ── East Asia (3) — JMA primary + GFS validator ───────────────────────────
+    {"name": "Seoul",         "lat": 37.5665,  "lon": 126.9780,  "station": "RKSS", "emoji": "🏮",  "celsius": True, "timezone": "Asia/Seoul",     "primary_model": "jma_seamless", "primary_label": "JMA"},
+    {"name": "Tokyo",         "lat": 35.5494,  "lon": 139.7798,  "station": "RJTT", "emoji": "🏯",  "celsius": True, "timezone": "Asia/Tokyo",     "primary_model": "jma_seamless", "primary_label": "JMA"},
+    {"name": "Shanghai",      "lat": 31.1443,  "lon": 121.8083,  "station": "ZSPD", "emoji": "🏙️", "celsius": True, "timezone": "Asia/Shanghai",  "primary_model": "jma_seamless", "primary_label": "JMA"},
+    # To add new regions later, add "primary_model" / "primary_label" overrides:
+    #   gem_seamless (Canada), bom_access_global (Australia), ukmo_seamless (UK)
 ]
+
+# ── Model tier mapping (for analytics grouping) ──────────────────────────────
+# Derived from CITIES config — maps city name → model tier label.
+# Used by dashboard to group performance by forecast model.
+CITY_MODEL_TIER: dict[str, str] = {}
+for _city in CITIES:
+    if not _city.get("celsius", False):
+        CITY_MODEL_TIER[_city["name"]] = "NOAA"
+    else:
+        CITY_MODEL_TIER[_city["name"]] = _city.get("primary_label", INTL_DEFAULT_LABEL)
 
 TEMP_THRESHOLDS_F = [40, 45, 50, 55, 60, 62, 64, 65, 66, 67, 68, 69, 70, 72, 75, 80, 85, 90]
 TEMP_THRESHOLDS_C = [-5, 0, 2, 4, 5, 6, 7, 8, 9, 10, 12, 14, 15, 16, 17, 18, 20, 22, 25, 28, 30]
