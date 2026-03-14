@@ -526,7 +526,7 @@ def _trade_to_dict(t: Trade) -> dict:
         "market_volume": t.market_volume,
         "noaa_forecast_high": t.noaa_forecast_high,
         "gfs_forecast": t.gfs_forecast,
-        "ecmwf_forecast": t.ecmwf_forecast,
+        "icon_forecast": t.ecmwf_forecast,  # DB column still named ecmwf_forecast; now stores ICON
         "models_agreed": t.models_agreed,
         "noaa_sigma": t.noaa_sigma,
         "noaa_true_prob": t.noaa_true_prob,

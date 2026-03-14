@@ -9,7 +9,7 @@ import numpy as np
 import sys, os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import NOAA_BASE, NOAA_HEADERS, CITIES, TEMP_THRESHOLDS_F, TEMP_THRESHOLDS_C, TEMP_THRESHOLDS
+from config import NOAA_BASE, NOAA_HEADERS, CITIES, TEMP_THRESHOLDS_F, TEMP_THRESHOLDS_C, TEMP_THRESHOLDS, INTL_DEFAULT_MODEL, INTL_DEFAULT_LABEL
 
 OPEN_METEO_BASE = "https://api.open-meteo.com/v1"
 
@@ -152,7 +152,7 @@ def compute_sigma(day_offset: int, is_celsius: bool = False, season_factor: floa
       day 0 -> 3.5F, day 1 -> 4.5F, day 2 -> 5.5F, day 3+ -> 6.0F
 
     For Celsius cities, convert to C via x(5/9).
-    This gives day+1 sigma ~2.5C, matching ECMWF next-day empirical error.
+    This gives day+1 sigma ~2.5C, matching typical next-day empirical error.
     season_factor > 1.0 for winter (more variability), < 1.0 for summer.
     """
     base_f = {0: 3.5, 1: 4.5, 2: 5.5}.get(day_offset, 6.0)
@@ -271,25 +271,28 @@ async def fetch_city_forecast(city: dict, day_offset: int, client: httpx.AsyncCl
     thresholds = TEMP_THRESHOLDS_C if is_celsius else TEMP_THRESHOLDS_F
 
     if is_celsius:
-        # ── International: ECMWF primary, Open-Meteo GFS as fallback ──────────
-        # ECMWF IFS is the most accurate global model for 1-5 day forecasts.
+        # ── International: ICON primary (or per-city override), GFS as fallback ──
         utc_now = datetime.now(timezone.utc)
-        # Use straight UTC date + day_offset — consistent with ECMWF/GFS validator logic.
-        # day_offset is already market-date-derived by the scanner, so no noon adjustment needed.
         target_date = (utc_now.date() + timedelta(days=day_offset)).strftime("%Y-%m-%d")
 
-        # Primary: ECMWF
-        forecast_low = None  # ECMWF returns high only; set from om only if fallback runs
-        forecast_high = await fetch_ecmwf_forecast_high(lat, lon, day_offset=day_offset, celsius=True)
+        # Read per-city model override, or use global default (ICON)
+        model_name = city.get("primary_model", INTL_DEFAULT_MODEL)
+        model_label = city.get("primary_label", INTL_DEFAULT_LABEL)
 
-        # Fallback: generic Open-Meteo (GFS-based) if ECMWF unavailable
+        # Primary: city's configured model (default ICON)
+        forecast_low = None  # model returns high only; set from om only if fallback runs
+        forecast_high = await fetch_model_forecast_high(lat, lon, day_offset=day_offset, celsius=True, model=model_name)
+
+        source = model_label
+        # Fallback: generic Open-Meteo (GFS-based) if primary model unavailable
         if forecast_high is None:
             om = await fetch_openmeteo_forecast(lat, lon, day_offset, client, target_date=target_date)
             if not om:
                 return None
             forecast_high = om["high_c"]
             forecast_low = om.get("low_c")
-            logger.warning(f"[{city['name']}] ECMWF unavailable, fell back to Open-Meteo GFS")
+            source = "Open-Meteo-GFS"
+            logger.warning(f"[{city['name']}] {model_label} unavailable, fell back to Open-Meteo GFS")
         sigma = compute_sigma(day_offset, is_celsius=True)
         confidence = compute_confidence(sigma, is_celsius=True)
         current_obs = await get_openmeteo_observation(lat, lon, client)
@@ -312,7 +315,7 @@ async def fetch_city_forecast(city: dict, day_offset: int, client: httpx.AsyncCl
             "bucket_probs": bucket_probs,
             "current_obs": current_obs,
             "unit": "C",
-            "source": "ECMWF" if forecast_low is None else "Open-Meteo-GFS",
+            "source": source,
         }
 
     else:
@@ -563,80 +566,29 @@ async def fetch_gfs_forecast_high(
     return None
 
 
-async def fetch_ecmwf_forecast_high(
+async def fetch_model_forecast_high(
     lat: float,
     lon: float,
     day_offset: int = 0,
     celsius: bool = False,
+    model: str = "icon_seamless",
     city_timezone: str = "UTC",
 ) -> Optional[float]:
     """
-    Fetch forecast high from ECMWF IFS model via Open-Meteo.
-    ECMWF is generally the most accurate global model for 1-5 day forecasts.
-    Returns °F for US cities (celsius=False) or °C for international (celsius=True).
+    Fetch forecast high from any Open-Meteo model.
+    Used for international primary (ICON default, per-city overrideable)
+    and as US validator (ICON replacing ECMWF).
 
-    Strategy: try hourly endpoint first (compute daily max from hourly temps),
-    fall back to daily endpoint. The daily endpoint often returns NULL highs
-    while hourly data is available.
+    Available models: icon_seamless, gem_seamless, jma_seamless,
+                      ukmo_seamless, bom_access_global, ecmwf_ifs04
+    Returns °F for US cities (celsius=False) or °C for international (celsius=True).
     """
     from datetime import timedelta, date, datetime as _datetime, timezone as _tz
     utc_now = _datetime.now(_tz.utc)
     target_date = (utc_now.date() + timedelta(days=day_offset)).isoformat()
+    label = model.split("_")[0].upper()  # icon_seamless → ICON
 
-    # ── Attempt 1: Hourly endpoint → compute daily max ────────────────────────
-    for attempt in range(2):
-        try:
-            async with httpx.AsyncClient() as client:
-                r = await client.get(
-                    f"{OPEN_METEO_BASE}/forecast",
-                    params={
-                        "latitude": lat,
-                        "longitude": lon,
-                        "hourly": "temperature_2m",
-                        "temperature_unit": "celsius",
-                        "timezone": "UTC",
-                        "start_date": target_date,
-                        "end_date": target_date,
-                        "models": "ecmwf_ifs04",
-                    },
-                    timeout=15.0,
-                )
-                if r.status_code in (429, 504):
-                    await asyncio.sleep((attempt + 1) * 3)
-                    continue
-                r.raise_for_status()
-                data = r.json()
-                hours = data.get("hourly", {}).get("time", [])
-                temps = data.get("hourly", {}).get("temperature_2m", [])
-
-                # Filter valid (non-null) temps for the target date
-                valid_temps = [
-                    float(t) for h, t in zip(hours, temps)
-                    if t is not None and h[:10] == target_date
-                ]
-                if valid_temps:
-                    high_c = max(valid_temps)
-                    result = round(high_c, 1) if celsius else round(high_c * 9 / 5 + 32, 1)
-                    logger.info(
-                        f"[ECMWF-hourly] ({lat},{lon}) {target_date}: "
-                        f"max of {len(valid_temps)} hourly readings = {high_c:.1f}°C → "
-                        f"{result:.1f}{'°C' if celsius else '°F'}"
-                    )
-                    return result
-                else:
-                    null_count = sum(1 for h, t in zip(hours, temps) if h[:10] == target_date and t is None)
-                    logger.info(
-                        f"[ECMWF-hourly] ({lat},{lon}) {target_date}: "
-                        f"no valid hourly temps ({null_count} null, {len(hours)} total hours) — trying daily"
-                    )
-                    break  # fall through to daily attempt
-        except Exception as e:
-            logger.warning(f"[ECMWF-hourly] ({lat},{lon}) attempt {attempt+1} failed: {e}")
-            if attempt < 1:
-                await asyncio.sleep((attempt + 1) * 3)
-
-    # ── Attempt 2: Daily endpoint (original method) ───────────────────────────
-    for attempt in range(2):
+    for attempt in range(3):
         try:
             async with httpx.AsyncClient() as client:
                 r = await client.get(
@@ -648,7 +600,7 @@ async def fetch_ecmwf_forecast_high(
                         "temperature_unit": "celsius",
                         "timezone": "auto",
                         "forecast_days": max(3, day_offset + 2),
-                        "models": "ecmwf_ifs04",
+                        "models": model,
                     },
                     timeout=15.0,
                 )
@@ -663,25 +615,24 @@ async def fetch_ecmwf_forecast_high(
                     if d == target_date and h is not None:
                         high_c = float(h)
                         result = round(high_c, 1) if celsius else round(high_c * 9 / 5 + 32, 1)
-                        logger.info(f"[ECMWF-daily] ({lat},{lon}) {target_date}: {high_c:.1f}°C → {result:.1f}{'°C' if celsius else '°F'}")
+                        logger.info(f"[{label}] ({lat},{lon}) {target_date}: {high_c:.1f}°C → {result:.1f}{'°C' if celsius else '°F'}")
                         return result
-
-                # Diagnostic: log failure details
+                # Diagnostic on failure
                 null_dates = [d for d, h in zip(dates, highs) if d == target_date and h is None]
                 if null_dates:
                     logger.warning(
-                        f"[ECMWF-daily] ({lat},{lon}) {target_date}: date found but high is NULL | "
+                        f"[{label}] ({lat},{lon}) {target_date}: date found but high is NULL | "
                         f"available dates={dates} | highs={highs}"
                     )
                 else:
                     logger.warning(
-                        f"[ECMWF-daily] ({lat},{lon}) {target_date}: date not in response | "
+                        f"[{label}] ({lat},{lon}) {target_date}: date not in response | "
                         f"available dates={dates} | forecast_days={max(3, day_offset + 2)}"
                     )
                 return None
         except Exception as e:
-            logger.warning(f"[ECMWF-daily] ({lat},{lon}) attempt {attempt+1} failed: {e}")
-            if attempt < 1:
+            logger.warning(f"[{label}] ({lat},{lon}) attempt {attempt+1} failed: {e}")
+            if attempt < 2:
                 await asyncio.sleep((attempt + 1) * 3)
     return None
 

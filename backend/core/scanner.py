@@ -10,7 +10,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import BOT_CONFIG, CITIES, TEMP_THRESHOLDS_F, TEMP_THRESHOLDS_C, TEMP_THRESHOLDS
 from data.noaa import (
     get_nws_daily_high, get_openmeteo_daily_high,
-    fetch_gfs_forecast_high, fetch_ecmwf_forecast_high
+    fetch_gfs_forecast_high
 )
 from data.polymarket import build_market_map
 from core.signals import (
@@ -115,12 +115,11 @@ def _is_too_late_for_reentry(end_date_str: str) -> bool:
 
 async def fetch_validator_forecasts(city_cfg: dict, day_offset: int = 0) -> dict:
     """
-    Fetch GFS and ECMWF validator forecasts for a city.
-    Serialized with small stagger to avoid 429s.
-
-    International cities (celsius=True) use ECMWF as primary forecast,
-    so ECMWF is skipped here to avoid double-counting in consensus.
-    Returns {"gfs": float|None, "ecmwf": float|None}
+    Fetch GFS validator forecast for a city.
+    International cities use ICON as primary, so only GFS is needed as validator.
+    US cities use NOAA as primary, so only GFS is needed as validator.
+    ICON can be added as a US validator later once intl accuracy is measured.
+    Returns {"gfs": float|None, "icon": None}
     """
     is_celsius = city_cfg.get("celsius", False)
     lat, lon = city_cfg["lat"], city_cfg["lon"]
@@ -128,23 +127,15 @@ async def fetch_validator_forecasts(city_cfg: dict, day_offset: int = 0) -> dict
 
     gfs = await fetch_gfs_forecast_high(lat, lon, day_offset, is_celsius, tz)
 
-    # Only fetch ECMWF as validator for US cities (where NOAA is primary).
-    # International cities already use ECMWF as primary — fetching it again
-    # would double-count ECMWF in consensus and inflate agreement artificially.
-    ecmwf = None
-    if not is_celsius:
-        await asyncio.sleep(1.5)  # stagger to avoid Open-Meteo 429s
-        ecmwf = await fetch_ecmwf_forecast_high(lat, lon, day_offset, is_celsius, tz)
-
-    return {"gfs": gfs, "ecmwf": ecmwf}
+    return {"gfs": gfs, "icon": None}
 
 
 async def run_scan() -> dict:
     """
     Full scan cycle V3 (multi-day):
     1. Fetch Polymarket prices — today + tomorrow per city (day+2 as fallback only)
-    2. Fetch primary forecasts per city-date pair (NOAA for US, ECMWF for intl)
-    3. Fetch GFS validator forecasts per city-date pair (ECMWF validator for US only)
+    2. Fetch primary forecasts per city-date pair (NOAA for US, ICON for intl)
+    3. Fetch GFS validator forecasts per city-date pair
     4. Settle open positions via Polymarket resolution
     5. Evaluate signals with directional gate + consensus + timing + re-entry + city caps
     6. Open paper trades (best signal per city-date, re-check city caps at open time)
@@ -212,7 +203,7 @@ async def run_scan() -> dict:
             log(f"City-date offsets: { {f'{c}/{d}': o for (c, d), o in city_date_offset.items()} }")
 
             # ── Step 2: Fetch primary forecasts — sequential per city, shared client ─
-            log("Fetching primary forecasts (NOAA/ECMWF)...")
+            log("Fetching primary forecasts (NOAA/ICON)...")
             import httpx as _httpx
             from data.noaa import fetch_city_forecast as _fetch_city_forecast
             forecast_map: dict[tuple[str, str], dict] = {}  # (city, date_str) -> forecast
@@ -227,7 +218,7 @@ async def run_scan() -> dict:
                         is_intl = city_cfg.get("celsius", False)
                         for date_str in date_strs:
                             # Stagger Open-Meteo calls to avoid 429s.
-                            # International primary hits Open-Meteo (ECMWF/GFS);
+                            # International primary hits Open-Meteo (ICON/GFS);
                             # US primary hits NWS (different API, no shared rate limit).
                             if fetch_idx > 0 and is_intl:
                                 await asyncio.sleep(1.5)
@@ -255,9 +246,9 @@ async def run_scan() -> dict:
                 scan_result["errors"].append(f"Forecast: {e}")
                 return scan_result
 
-            # ── Step 3: Fetch GFS + ECMWF validators per city-date pair ─────
-            log("Fetching GFS + ECMWF validator forecasts...")
-            validator_map: dict[tuple[str, str], dict] = {}  # (city, date_str) -> {gfs, ecmwf}
+            # ── Step 3: Fetch GFS validator forecasts per city-date pair ─────
+            log("Fetching GFS validator forecasts...")
+            validator_map: dict[tuple[str, str], dict] = {}  # (city, date_str) -> {gfs, icon}
             fetch_count = 0
             for city_name, date_strs in city_dates.items():
                 city_cfg = city_by_name.get(city_name)
@@ -271,11 +262,10 @@ async def run_scan() -> dict:
                         validators = await fetch_validator_forecasts(city_cfg, day_offset=offset)
                         validator_map[(city_name, date_str)] = validators
                         gfs_val = f"{validators['gfs']:.1f}" if validators['gfs'] is not None else "N/A"
-                        ecmwf_val = f"{validators['ecmwf']:.1f}" if validators['ecmwf'] is not None else "N/A"
-                        log(f"Validators {city_name}/{date_str} (offset={offset}): GFS={gfs_val} ECMWF={ecmwf_val}")
+                        log(f"Validator {city_name}/{date_str} (offset={offset}): GFS={gfs_val}")
                     except Exception as e:
                         log(f"Validator fetch failed for {city_name}/{date_str}: {e}", "WARN")
-                        validator_map[(city_name, date_str)] = {"gfs": None, "ecmwf": None}
+                        validator_map[(city_name, date_str)] = {"gfs": None, "icon": None}
                     fetch_count += 1
 
             # ── Step 4: Settle open positions via Polymarket resolution ────
@@ -415,9 +405,9 @@ async def run_scan() -> dict:
                     continue
 
                 primary_forecast = f.get("forecast_high")
-                validators = validator_map.get((city, market_date_str), {"gfs": None, "ecmwf": None})
+                validators = validator_map.get((city, market_date_str), {"gfs": None, "icon": None})
                 gfs_forecast = validators.get("gfs")
-                ecmwf_forecast = validators.get("ecmwf")
+                icon_forecast = validators.get("icon")
 
                 for threshold in thresholds_for_city:
                     mkt_key = (city, market_date_str, threshold)
@@ -492,7 +482,7 @@ async def run_scan() -> dict:
                         primary_source=f.get("source"),
                         is_celsius=is_celsius,
                         gfs_forecast=gfs_forecast,
-                        ecmwf_forecast=ecmwf_forecast,
+                        icon_forecast=icon_forecast,
                         is_early_window=is_early,
                         entry_number=entry_number,
                         prior_entry_edge=prior_ev,
@@ -515,7 +505,7 @@ async def run_scan() -> dict:
                             "forecast": f,
                             "primary_forecast": primary_forecast,
                             "gfs_forecast": gfs_forecast,
-                            "ecmwf_forecast": ecmwf_forecast,
+                            "icon_forecast": icon_forecast,
                             "is_early_window": is_early,
                             "entry_number": entry_number,
                             "prior_entry_edge": prior_ev,
@@ -532,7 +522,7 @@ async def run_scan() -> dict:
                         log(
                             f"SIGNAL {city} | MarketDate={market_date_str} | Bucket=>={threshold}{unit} {direction} | "
                             f"Primary={primary_forecast:.1f} GFS={f'{gfs_forecast:.1f}' if gfs_forecast is not None else 'N/A'} "
-                            f"ECMWF={f'{ecmwf_forecast:.1f}' if ecmwf_forecast is not None else 'N/A'} | "
+                            f"ICON={f'{icon_forecast:.1f}' if icon_forecast is not None else 'N/A'} | "
                             f"Edge={edge:.1%} Models={sizing.get('models_agreed','?')} "
                             f"EventVol=${event_vol:,.0f} BucketVol=${bucket_vol:,.0f} "
                             f"{sizing.get('spread_note','')} "
@@ -581,7 +571,8 @@ async def run_scan() -> dict:
 
                 # Inject extra data into forecast dict for open_paper_trade
                 sig["forecast"]["gfs_forecast"] = sig.get("gfs_forecast")
-                sig["forecast"]["ecmwf_forecast"] = sig.get("ecmwf_forecast")
+                # DB column is still named ecmwf_forecast (no migration), but stores ICON value
+                sig["forecast"]["ecmwf_forecast"] = sig.get("icon_forecast")
                 sig["forecast"]["prior_entry_edge"] = sig.get("prior_entry_edge")
                 sig["forecast"]["crowd_price_at_prior"] = sig.get("crowd_price_at_prior")
                 sig["forecast"]["market_date"] = sig.get("market_date")

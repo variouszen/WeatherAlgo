@@ -58,12 +58,12 @@ def evaluate_signal(
     market_date: str = None,         # YYYY-MM-DD — required for per-date dedup
     volume: float = 0.0,              # kept for API compatibility — not used in filter logic
     # Forecast values for directional gate + consensus
-    primary_forecast: float = None,     # NOAA for US, ECMWF for intl
-    primary_source: str = None,         # "NOAA/NWS", "ECMWF", or "Open-Meteo-GFS"
+    primary_forecast: float = None,     # NOAA for US, ICON for intl
+    primary_source: str = None,         # "NOAA/NWS", "ICON", or "Open-Meteo-GFS"
     is_celsius: bool = False,
     # Model consensus
     gfs_forecast: float = None,
-    ecmwf_forecast: float = None,
+    icon_forecast: float = None,
     # Timing
     is_early_window: bool = False,
     # Re-entry
@@ -171,11 +171,11 @@ def evaluate_signal(
     primary_is_gfs = primary_source and "GFS" in primary_source.upper()
     if primary_is_gfs and gfs_forecast is not None:
         # GFS validator is same source family as primary — not independent
-        independent_validators = [f for f in [ecmwf_forecast] if f is not None]
+        independent_validators = [f for f in [icon_forecast] if f is not None]
         all_forecasts = [f for f in [primary_forecast] + independent_validators if f is not None]
         spread_note = " [GFS-primary: validator excluded]"
     else:
-        all_forecasts = [f for f in [primary_forecast, gfs_forecast, ecmwf_forecast] if f is not None]
+        all_forecasts = [f for f in [primary_forecast, gfs_forecast, icon_forecast] if f is not None]
 
     if len(all_forecasts) >= 2:
         # Count how many models agree on direction using prob_above, not raw comparison.
@@ -302,7 +302,7 @@ async def open_paper_trade(
         bankroll_at_entry=bankroll_state.balance,
         status="OPEN",
         gfs_forecast=noaa_data.get("gfs_forecast"),
-        ecmwf_forecast=noaa_data.get("ecmwf_forecast"),
+        ecmwf_forecast=noaa_data.get("ecmwf_forecast"),  # DB column name; now stores ICON value
         models_agreed=sizing.get("models_agreed"),
         early_window=sizing.get("early_window", False),
         entry_number=sizing.get("entry_number", 1),

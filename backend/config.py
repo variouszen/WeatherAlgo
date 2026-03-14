@@ -34,11 +34,11 @@ BOT_CONFIG = {
     # sigma + edge + confidence already handle near-threshold uncertainty
 
     # --- Multi-model consensus (confidence layer — sizing modifier) ---
-    # GFS and ECMWF called via Open-Meteo as independent validators
-    # US: NOAA primary + GFS + ECMWF validators (all 3 agree = full size)
-    # Intl: ECMWF primary + GFS validator (both agree = full size)
-    "consensus_full_size_models": 3,    # all models agree → full kelly
-    "consensus_reduced_size_models": 2, # 2/3 agree → reduced kelly
+    # GFS called via Open-Meteo as independent validator
+    # US: NOAA primary + GFS validator (2 models)
+    # Intl: ICON primary + GFS validator (2 models)
+    "consensus_full_size_models": 2,    # all models agree → full kelly (US: NOAA+GFS, Intl: ICON+GFS)
+    "consensus_reduced_size_models": 1, # only primary agrees → reduced kelly (intl GFS-fallback)
     "consensus_reduced_factor": 0.5,    # multiply kelly by this when reduced
     # Max raw forecast spread between any two models before skipping entirely
     "max_model_spread_f": 6.0,
@@ -89,6 +89,13 @@ BOT_CONFIG = {
 }
 
 # ── Cities ────────────────────────────────────────────────────────────────────
+# International primary model: defaults to ICON (DWD, Germany).
+# Override per city with "primary_model" / "primary_label" for regional accuracy.
+# Available models: icon_seamless, gem_seamless (Canada), jma_seamless (Japan),
+#                   ukmo_seamless (UK), bom_access_global (Australia)
+INTL_DEFAULT_MODEL = "icon_seamless"
+INTL_DEFAULT_LABEL = "ICON"
+
 CITIES = [
     {"name": "New York",      "lat": 40.7128,  "lon": -74.0060,  "station": "KLGA", "emoji": "🗽",  "celsius": False, "timezone": "America/New_York"},
     {"name": "Chicago",       "lat": 41.8781,  "lon": -87.6298,  "station": "KORD", "emoji": "🌬️", "celsius": False, "timezone": "America/Chicago"},
@@ -102,6 +109,7 @@ CITIES = [
     {"name": "Seoul",         "lat": 37.5665,  "lon": 126.9780,  "station": "RKSS", "emoji": "🏮",  "celsius": True, "timezone": "Asia/Seoul"},
     {"name": "Paris",         "lat": 48.8566,  "lon": 2.3522,    "station": "LFPG", "emoji": "🗼",  "celsius": True, "timezone": "Europe/Paris"},
     {"name": "Toronto",       "lat": 43.6777,  "lon": -79.6248,  "station": "CYYZ", "emoji": "🍁",  "celsius": True, "timezone": "America/Toronto"},
+    # To override a city's model later, add: "primary_model": "jma_seamless", "primary_label": "JMA"
 ]
 
 TEMP_THRESHOLDS_F = [40, 45, 50, 55, 60, 62, 64, 65, 66, 67, 68, 69, 70, 72, 75, 80, 85, 90]
