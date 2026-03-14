@@ -69,7 +69,9 @@ CITY_CELSIUS: set[str] = {"London", "Paris", "Munich", "Seoul", "Tokyo", "Shangh
 SLIPPAGE_HAIRCUT = 0.02
 MIN_VALID_BUCKETS = 3
 MIN_PRICE_MASS = 0.50
-MIN_BUCKET_PRICE = 0.02   # per-bucket floor — skip bucket, not event
+MIN_BUCKET_PRICE = 0.001  # ingestion floor: let all real buckets into probability math.
+                          # Trade-level filtering (price bounds, edge, Kelly) prevents
+                          # execution on extreme tails. See signals.py for trade filters.
 MAX_FORWARD_DAYS = 3      # try today, +1, +2
 
 
@@ -155,7 +157,11 @@ def _validate_event(event: dict, city: str, target_date: date) -> tuple[bool, st
     if event.get("closed", True):
         return False, "Event is closed"
 
-    # 4. endDate: must exist, parseable, not expired, not closing < 3h, match target_date
+    # 4. endDate: used for DATE MATCHING only, NOT as a trading close indicator.
+    #    Polymarket's endDate (e.g., 2026-03-14T12:00:00Z) is a metadata timestamp,
+    #    not the actual trading close time. The active/closed flags (checked above)
+    #    are the reliable indicators of whether the market is still tradeable.
+    #    We parse endDate only to confirm the event matches the target date.
     end_date_raw = event.get("endDate") or event.get("end_date")
     if not end_date_raw:
         return False, "Event has no endDate"
@@ -173,14 +179,9 @@ def _validate_event(event: dict, city: str, target_date: date) -> tuple[bool, st
     except Exception as e:
         return False, f"Cannot parse endDate '{end_date_raw}': {e}"
 
-    now_utc = datetime.now(timezone.utc)
-    if end_dt <= now_utc:
-        return False, f"Event already closed (endDate={end_date_raw})"
-
-    mins_left = (end_dt - now_utc).total_seconds() / 60
-    if mins_left < 180:
-        return False, f"Event closes too soon ({int(mins_left)}min left, need ≥180min)"
-
+    # Date sanity check — reject if endDate is for the wrong day entirely.
+    # Slug-based fetch already guarantees date alignment, but this catches
+    # cases where Polymarket returns a mismatched event for a slug.
     diff = abs((end_dt.date() - target_date).days)
     if diff > 1:
         return False, (
