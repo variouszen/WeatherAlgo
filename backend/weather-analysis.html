@@ -161,7 +161,7 @@ let allTrades = [];
 let excludeFlagged = false;
 
 async function fetchTrades() {
-  const r = await fetch(`${API}/api/trades`);
+  const r = await fetch(`${API}/api/trades?limit=500`);
   return await r.json();
 }
 
@@ -278,9 +278,18 @@ function render(trades) {
 
     <!-- Row 4: Settlement timing -->
     <div class="panels">
-      <div class="panel">
+      <div class="panel full">
         <h2>Settlement Timing Audit <span class="badge" style="background:rgba(239,68,68,0.15);color:var(--red);">hours vs EOD</span></h2>
         <canvas id="settleTiming" height="200"></canvas>
+      </div>
+    </div>
+
+    <!-- Row 4b: Performance by Horizon -->
+    <div class="panels">
+      <div class="panel">
+        <h2>Performance by Horizon <span class="badge" style="background:rgba(6,182,212,0.15);color:var(--cyan);">day offset</span></h2>
+        <div id="horizonCards"></div>
+        <canvas id="horizonChart" height="200"></canvas>
       </div>
       <div class="panel">
         <h2>Threshold Proximity <span class="badge" style="background:rgba(59,130,246,0.15);color:var(--blue);">margin vs outcome</span></h2>
@@ -308,6 +317,7 @@ function render(trades) {
   buildModelAccuracy(closed);
   buildCityBias(closed);
   buildSettleTiming(closed);
+  buildHorizon(closed);
   buildThreshProx(closed);
   buildForecastActual(closed);
 }
@@ -555,12 +565,14 @@ function buildCityBias(closed) {
 
 // ── Panel: Settlement timing ───────────────────────────────────
 function buildSettleTiming(closed) {
+  // Reference: 20:00 UTC on market_date — when daily highs are typically finalized.
+  // Matches isFlagged() early-settle threshold. Positive = settled before 20:00 (risky).
   const data = closed.map(t => {
     if (!t.resolved_at || !t.market_date) return null;
     const resolved = new Date(t.resolved_at);
-    const eod = new Date(t.market_date + 'T23:59:59Z');
-    const hoursBeforeEod = (eod - resolved) / 3600000;
-    return { city: t.city, date: t.market_date, hours: hoursBeforeEod, status: t.status, id: t.id };
+    const tempDayEnd = new Date(t.market_date + 'T20:00:00Z');
+    const hoursBefore = (tempDayEnd - resolved) / 3600000;
+    return { city: t.city, date: t.market_date, hours: hoursBefore, status: t.status, id: t.id };
   }).filter(Boolean);
 
   new Chart(document.getElementById('settleTiming'), {
@@ -569,7 +581,7 @@ function buildSettleTiming(closed) {
       labels: data.map(d => d.city.substring(0,3) + ' #' + d.id),
       datasets: [{
         data: data.map(d => d.hours),
-        backgroundColor: data.map(d => d.hours > 6 ? 'rgba(239,68,68,0.7)' : d.hours > 0 ? 'rgba(245,158,11,0.7)' : 'rgba(34,197,94,0.7)'),
+        backgroundColor: data.map(d => d.hours > 4 ? 'rgba(239,68,68,0.7)' : d.hours > 0 ? 'rgba(245,158,11,0.7)' : 'rgba(34,197,94,0.7)'),
         borderRadius: 3,
       }]
     },
@@ -578,12 +590,69 @@ function buildSettleTiming(closed) {
         title: ctx => data[ctx[0].dataIndex].city + ' ' + data[ctx[0].dataIndex].date,
         label: ctx => {
           const h = ctx.raw;
-          return h > 6 ? `⚠️ ${h.toFixed(1)}h before EOD — possibly premature` : `${h.toFixed(1)}h before EOD`;
+          return h > 0 ? `⚠️ ${h.toFixed(1)}h before temp day end — possibly premature` : `${Math.abs(h).toFixed(1)}h after temp day end ✓`;
         }
       }}},
       scales: {
-        y: { grid: { color: '#1e2a3a' }, title: { display: true, text: 'Hours before midnight UTC', color: '#64748b' } },
+        y: { grid: { color: '#1e2a3a' }, title: { display: true, text: 'Hours before 20:00 UTC (temp day end)', color: '#64748b' } },
         x: { grid: { display: false }, ticks: { maxRotation: 45 } }
+      }
+    }
+  });
+}
+
+// ── Panel: Performance by Horizon ──────────────────────────────
+function buildHorizon(closed) {
+  // Group by forecast_day_offset
+  const byOffset = {};
+  closed.forEach(t => {
+    const off = t.forecast_day_offset ?? 0;
+    const key = `Day+${off}`;
+    if (!byOffset[key]) byOffset[key] = { trades: 0, wins: 0, pnl: 0, edgeSum: 0, errorSum: 0, errorCount: 0 };
+    byOffset[key].trades++;
+    if (t.status === 'WIN') byOffset[key].wins++;
+    byOffset[key].pnl += (t.net_pnl || 0);
+    byOffset[key].edgeSum += (t.edge_pct || 0);
+    if (t.forecast_error_f != null) {
+      byOffset[key].errorSum += Math.abs(t.forecast_error_f);
+      byOffset[key].errorCount++;
+    }
+  });
+
+  const keys = Object.keys(byOffset).sort();
+
+  // Summary cards
+  const cardsHtml = keys.map(k => {
+    const d = byOffset[k];
+    const wr = d.trades ? (d.wins / d.trades * 100).toFixed(0) : '—';
+    const avgEdge = d.trades ? (d.edgeSum / d.trades).toFixed(1) : '—';
+    const avgPnl = d.trades ? (d.pnl / d.trades).toFixed(2) : '—';
+    const mae = d.errorCount ? (d.errorSum / d.errorCount).toFixed(1) : '—';
+    const pnlColor = d.pnl >= 0 ? 'var(--green)' : 'var(--red)';
+    return `<div style="display:inline-block;background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:10px 16px;margin:0 8px 8px 0;min-width:140px;">
+      <div style="font-size:13px;font-weight:600;color:var(--cyan);margin-bottom:4px;">${k}</div>
+      <div style="font-size:12px;color:var(--text2);">${d.trades} trades · ${wr}% WR</div>
+      <div style="font-size:12px;color:${pnlColor};">P&L: $${d.pnl >= 0 ? '+' : ''}${d.pnl.toFixed(2)} ($${avgPnl}/trade)</div>
+      <div style="font-size:11px;color:var(--text2);">Avg edge: ${avgEdge}% · MAE: ${mae}°</div>
+    </div>`;
+  }).join('');
+  document.getElementById('horizonCards').innerHTML = cardsHtml;
+
+  // Stacked bar: wins vs losses per horizon
+  new Chart(document.getElementById('horizonChart'), {
+    type: 'bar',
+    data: {
+      labels: keys,
+      datasets: [
+        { label: 'Wins', data: keys.map(k => byOffset[k].wins), backgroundColor: 'rgba(34,197,94,0.7)', borderRadius: 4 },
+        { label: 'Losses', data: keys.map(k => byOffset[k].trades - byOffset[k].wins), backgroundColor: 'rgba(239,68,68,0.5)', borderRadius: 4 },
+      ]
+    },
+    options: {
+      plugins: { legend: { display: true, position: 'top', labels: { boxWidth: 12 } } },
+      scales: {
+        y: { stacked: true, grid: { color: '#1e2a3a' }, title: { display: true, text: 'Trades', color: '#64748b' }, ticks: { stepSize: 1 } },
+        x: { stacked: true, grid: { display: false } }
       }
     }
   });
@@ -680,7 +749,7 @@ function buildForecastActual(closed) {
   const avgOrDash = arr => arr.length ? (arr.reduce((a,b)=>a+b,0)/arr.length).toFixed(1) + '°' : '—';
 
   table.innerHTML = `<thead><tr>
-    <th></th><th>City</th><th>Date</th><th>Dir</th><th>Threshold</th>
+    <th></th><th>City</th><th>Date</th><th>D+</th><th>Dir</th><th>Threshold</th>
     <th style="color:#3b82f6">NOAA</th><th style="color:#a855f7">ECMWF</th><th style="color:#14b8a6">GFS</th><th>Actual</th>
     <th>Error</th><th>Result</th><th>Net P&L</th>
   </tr></thead><tbody>` + closed.map(t => {
@@ -701,6 +770,7 @@ function buildForecastActual(closed) {
       <td>${flagHtml}</td>
       <td>${t.city}</td>
       <td>${(t.market_date || '').substring(5)}</td>
+      <td style="color:var(--cyan);font-size:11px;">${t.forecast_day_offset ?? 0}</td>
       <td>${t.direction}</td>
       <td>≥${t.threshold_f}${unit}</td>
       <td>${fmt(noaaVal)}</td>
@@ -713,7 +783,7 @@ function buildForecastActual(closed) {
     </tr>`;
   }).join('') + `</tbody>
   <tfoot><tr style="border-top:2px solid var(--border);font-weight:600;">
-    <td></td><td colspan="4" style="color:var(--text2);">AVG ABSOLUTE ERROR</td>
+    <td></td><td colspan="5" style="color:var(--text2);">AVG ABSOLUTE ERROR</td>
     <td style="color:#3b82f6">${avgOrDash(noaaErrs)}</td>
     <td style="color:#a855f7">${avgOrDash(ecmwfErrs)}</td>
     <td style="color:#14b8a6">${avgOrDash(gfsErrs)}</td>

@@ -1,7 +1,7 @@
 # backend/core/signals.py
 import logging
 import math
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
@@ -53,10 +53,11 @@ def evaluate_signal(
     confidence: float,
     direction: str,
     bankroll: float,
-    open_city_positions: list[str],
+    open_city_date_positions: set,   # set of (city, date_str) tuples
     open_yes_positions: int,
+    market_date: str = None,         # YYYY-MM-DD — required for per-date dedup
     volume: float = 0.0,              # kept for API compatibility — not used in filter logic
-    # Forecast values for directional gate + buffer
+    # Forecast values for directional gate + consensus
     primary_forecast: float = None,     # NOAA for US, ECMWF for intl
     is_celsius: bool = False,
     # Model consensus
@@ -128,9 +129,11 @@ def evaluate_signal(
             f"{cfg['max_yes_price_for_no']:.2f} — skipping NO"
         ), {}
 
-    # ── Filter 6: One position per city (unless re-entry enabled) ───────────────
-    if city in open_city_positions and entry_number == 1:
-        return False, f"Already have open position in {city}", {}
+    # ── Filter 6: One position per city-date (unless re-entry enabled) ─────────
+    # Same city + same date → blocked unless valid re-entry
+    # Same city + different date → allowed (city-wide caps enforced in scanner)
+    if (city, market_date) in open_city_date_positions and entry_number == 1:
+        return False, f"Already have open position in {city} for {market_date}", {}
 
     # ── Filter 7: Bankroll floor ─────────────────────────────────────────────────
     if bankroll < cfg["bankroll_floor"]:
@@ -358,7 +361,7 @@ async def settle_trade(
 
     trade.status = status
     trade.actual_high_f = actual_high_f  # may be None if only Polymarket-resolved
-    trade.resolved_at = datetime.utcnow()
+    trade.resolved_at = datetime.now(timezone.utc)
     trade.gross_pnl = gross_pnl
     trade.fees_usd = fees
     trade.net_pnl = net_pnl
@@ -389,7 +392,7 @@ async def log_calibration(
     sigma: float,
     market_date: str = None,
 ):
-    cal_date = market_date or date.today().isoformat()
+    cal_date = market_date or datetime.now(timezone.utc).date().isoformat()
     existing = await session.execute(
         select(CityCalibration).where(
             CityCalibration.city == city,
@@ -413,7 +416,7 @@ async def log_calibration(
 
 
 async def reset_daily_loss(session: AsyncSession, bankroll_state: BankrollState):
-    today = date.today().isoformat()
+    today = datetime.now(timezone.utc).date().isoformat()
     last_reset = bankroll_state.last_reset_date or ""
     if last_reset != today:
         bankroll_state.daily_loss_today = 0.0

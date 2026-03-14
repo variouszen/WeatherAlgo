@@ -8,8 +8,8 @@ Four key design decisions vs v2:
      No synthetic interpolation across unsupported thresholds ever fires a signal.
   3. The kill-switch is per-bucket (skip that bucket) not per-event.
      Legitimate tail buckets can be cheap; skip the bucket, not the whole event.
-  4. build_market_map() returns (market_map, city_date_map) so scanner knows which
-     market_date was selected per city without scanning keys.
+  4. build_market_map() returns (market_map, city_date_map) where city_date_map
+     is a set of (city, date_str) pairs — supports multiple dates per city.
 
 No tag-based fallback. If slug fetch fails or validation fails → city/date skipped entirely.
 """
@@ -408,24 +408,148 @@ def compute_cumulative_prob(buckets: list, threshold: float) -> Optional[float]:
     return round(min(max(prob_with_slippage, 0.01), 0.99), 4)
 
 
+# ── Per-city-date processing helper ──────────────────────────────────────────
+
+async def _process_city_date(
+    city: str,
+    target_date: date,
+    unit: str,
+    thresholds: list[float],
+    client: httpx.AsyncClient,
+    market_map: dict,
+    city_date_map: set,
+) -> bool:
+    """
+    Fetch, validate, and populate market_map for one city + one date.
+    Mutates market_map and city_date_map in place.
+    Returns True if a valid market was found and added.
+    """
+    event, rejection = await fetch_event_by_slug(city, target_date, client)
+
+    if event is None:
+        logger.info(f"[POLY] SKIP {city}/{target_date} | {rejection}")
+        return False
+
+    title           = event.get("title", "").strip()
+    end_date        = event.get("endDate") or event.get("end_date")
+    event_id        = str(event.get("id", ""))
+    slug            = build_slug(city, target_date)
+    market_date_str = target_date.isoformat()
+    nested_markets  = event.get("markets", [])
+    event_volume    = float(event.get("volumeNum") or event.get("volume") or 0.0)
+
+    # ── Parse buckets ─────────────────────────────────────────────
+    buckets: list = []
+    total_volume = 0.0
+
+    for nm in nested_markets:
+        label = (
+            nm.get("groupItemTitle")
+            or nm.get("question")
+            or nm.get("title")
+            or ""
+        ).strip()
+        if not label:
+            continue
+
+        parsed = parse_bucket_range(label)
+        if parsed is None:
+            logger.debug(f"[POLY] Unparseable bucket '{label}' — skip bucket")
+            continue
+
+        lo, hi = parsed
+        price = await _extract_bucket_price(nm, client)
+        if price is None:
+            logger.debug(
+                f"[POLY] No valid price for '{label}' ({city}/{target_date}) — skip bucket"
+            )
+            continue
+
+        clob_ids = _parse_json_field(nm.get("clobTokenIds", "[]"))
+        token_id = clob_ids[0] if clob_ids else None
+        vol      = float(nm.get("volumeNum") or nm.get("volume") or 0)
+        total_volume += vol
+
+        buckets.append({
+            "label":         label,
+            "low":           lo,
+            "high":          hi,
+            "price":         price,
+            "token_id":      token_id,
+            "bucket_volume": vol,
+        })
+
+    # ── Quality gate ──────────────────────────────────────────────
+    is_valid, reason = validate_bucket_set(buckets)
+    if not is_valid:
+        logger.warning(
+            f"[POLY] BUCKET FAIL {city}/{target_date} | {reason} | '{title[:55]}'"
+        )
+        return False
+
+    # ── Direct-threshold filtering ────────────────────────────────
+    direct_thresholds = get_direct_thresholds(buckets, thresholds)
+    if not direct_thresholds:
+        logger.warning(
+            f"[POLY] No direct threshold matches for {city}/{target_date} "
+            f"| bucket bounds: "
+            f"{sorted(b['low'] for b in buckets if b['low'] != float('-inf'))} "
+            f"| candidates (first 8): {thresholds[:8]}"
+        )
+        return False
+
+    logger.info(
+        f"[POLY] ✓ {city}/{market_date_str} | {len(buckets)} buckets | "
+        f"{len(direct_thresholds)} direct thresholds | "
+        f"EventVol=${event_volume:,.0f} BucketsVol=${total_volume:,.0f} | slug={slug}"
+    )
+
+    # ── Populate market_map ───────────────────────────────────────
+    for thresh in direct_thresholds:
+        cum_prob = compute_cumulative_prob(buckets, thresh)
+        if cum_prob is None:
+            continue
+        key = (city, market_date_str, thresh)
+        market_map[key] = {
+            "market_id":         event_id,
+            "event_slug":        slug,
+            "event_title":       title,
+            "yes_price":         cum_prob,
+            "volume":            total_volume,
+            "event_volume":      event_volume,
+            "unit":              unit,
+            "end_date":          end_date,
+            "bucket_count":      len(buckets),
+            "buckets":           buckets,
+            "price_source":      "CLOB+Gamma/slug",
+            "direct_thresholds": direct_thresholds,
+        }
+
+    city_date_map.add((city, market_date_str))
+    return True
+
+
 # ── Main entry point ──────────────────────────────────────────────────────────
 
 async def build_market_map(
     cities: list[str],
     thresholds: list[float],
-) -> tuple[dict, dict]:
+) -> tuple[dict, set]:
     """
     Returns:
         market_map    {(city, market_date_str, threshold): market_data}
-        city_date_map {city: market_date_str}
+        city_date_map set of (city, market_date_str) pairs
 
     Key uses 3-tuple to prevent date collision. Only direct-threshold entries
     are added — no synthetic interpolation fires from this map.
-    Takes soonest valid market per city (breaks after first success).
+
+    Multi-day: scans today AND tomorrow per city. Both can succeed.
+    Day+2 is fallback only — used when neither today nor tomorrow has a valid market.
+    Never adds day+2 alongside today or tomorrow.
     """
     utc_today = datetime.now(timezone.utc).date()
     market_map: dict = {}
-    city_date_map: dict[str, str] = {}
+    city_date_map: set[tuple[str, str]] = set()
 
     async with httpx.AsyncClient() as client:
         for city in cities:
@@ -434,120 +558,35 @@ async def build_market_map(
                 continue
 
             unit = "C" if city in CITY_CELSIUS else "F"
+            found_primary = False  # found at least one of today/tomorrow
 
-            for day_offset in range(MAX_FORWARD_DAYS):
+            # ── Try today (day+0) and tomorrow (day+1) ────────────────────
+            for day_offset in range(min(2, MAX_FORWARD_DAYS)):
                 target_date = utc_today + timedelta(days=day_offset)
-                event, rejection = await fetch_event_by_slug(city, target_date, client)
+                success = await _process_city_date(
+                    city, target_date, unit, thresholds,
+                    client, market_map, city_date_map,
+                )
+                if success:
+                    found_primary = True
 
-                if event is None:
-                    logger.info(f"[POLY] SKIP {city}/{target_date} | {rejection}")
-                    continue
-
-                title           = event.get("title", "").strip()
-                end_date        = event.get("endDate") or event.get("end_date")
-                event_id        = str(event.get("id", ""))
-                slug            = build_slug(city, target_date)
-                market_date_str = target_date.isoformat()
-                nested_markets  = event.get("markets", [])
-                event_volume    = float(event.get("volumeNum") or event.get("volume") or 0.0)
-
-                # ── Parse buckets ─────────────────────────────────────────────
-                buckets: list = []
-                total_volume = 0.0
-
-                for nm in nested_markets:
-                    label = (
-                        nm.get("groupItemTitle")
-                        or nm.get("question")
-                        or nm.get("title")
-                        or ""
-                    ).strip()
-                    if not label:
-                        continue
-
-                    parsed = parse_bucket_range(label)
-                    if parsed is None:
-                        logger.debug(f"[POLY] Unparseable bucket '{label}' — skip bucket")
-                        continue
-
-                    lo, hi = parsed
-                    price = await _extract_bucket_price(nm, client)
-                    if price is None:
-                        logger.debug(
-                            f"[POLY] No valid price for '{label}' ({city}/{target_date}) — skip bucket"
-                        )
-                        continue
-
-                    clob_ids = _parse_json_field(nm.get("clobTokenIds", "[]"))
-                    token_id = clob_ids[0] if clob_ids else None
-                    vol      = float(nm.get("volumeNum") or nm.get("volume") or 0)
-                    total_volume += vol
-
-                    buckets.append({
-                        "label":         label,
-                        "low":           lo,
-                        "high":          hi,
-                        "price":         price,
-                        "token_id":      token_id,
-                        "bucket_volume": vol,
-                    })
-
-                # ── Quality gate ──────────────────────────────────────────────
-                is_valid, reason = validate_bucket_set(buckets)
-                if not is_valid:
-                    logger.warning(
-                        f"[POLY] BUCKET FAIL {city}/{target_date} | {reason} | '{title[:55]}'"
-                    )
-                    continue
-
-                # ── Direct-threshold filtering ────────────────────────────────
-                direct_thresholds = get_direct_thresholds(buckets, thresholds)
-                if not direct_thresholds:
-                    logger.warning(
-                        f"[POLY] No direct threshold matches for {city}/{target_date} "
-                        f"| bucket bounds: "
-                        f"{sorted(b['low'] for b in buckets if b['low'] != float('-inf'))} "
-                        f"| candidates (first 8): {thresholds[:8]}"
-                    )
-                    continue
-
-                logger.info(
-                    f"[POLY] ✓ {city}/{market_date_str} | {len(buckets)} buckets | "
-                    f"{len(direct_thresholds)} direct thresholds | "
-                    f"EventVol=${event_volume:,.0f} BucketsVol=${total_volume:,.0f} | slug={slug}"
+            # ── Fallback: day+2 ONLY if neither today nor tomorrow found ──
+            if not found_primary and MAX_FORWARD_DAYS > 2:
+                target_date = utc_today + timedelta(days=2)
+                await _process_city_date(
+                    city, target_date, unit, thresholds,
+                    client, market_map, city_date_map,
                 )
 
-                # ── Populate market_map ───────────────────────────────────────
-                for thresh in direct_thresholds:
-                    cum_prob = compute_cumulative_prob(buckets, thresh)
-                    if cum_prob is None:
-                        continue
-                    key = (city, market_date_str, thresh)
-                    market_map[key] = {
-                        "market_id":         event_id,
-                        "event_slug":        slug,
-                        "event_title":       title,
-                        "yes_price":         cum_prob,
-                        "volume":            total_volume,   # kept for DB compat (market_volume column)
-                        "event_volume":      event_volume,   # event-level volume for liquidity gate
-                        "unit":              unit,
-                        "end_date":          end_date,
-                        "bucket_count":      len(buckets),
-                        "buckets":           buckets,        # each bucket has bucket_volume field
-                        "price_source":      "CLOB+Gamma/slug",
-                        "direct_thresholds": direct_thresholds,
-                    }
-
-                city_date_map[city] = market_date_str
-                break   # soonest valid date wins — never try later offsets for this city
-
-            if city not in city_date_map:
+            if not any(c == city for c, _ in city_date_map):
                 logger.info(
                     f"[POLY] No valid event for '{city}' in next {MAX_FORWARD_DAYS} days"
                 )
 
+    cities_found = len(set(c for c, _ in city_date_map))
     logger.info(
-        f"[POLY] Market map: {len(market_map)} entries across {len(city_date_map)} cities"
+        f"[POLY] Market map: {len(market_map)} entries across "
+        f"{cities_found} cities, {len(city_date_map)} city-date pairs"
     )
     if not market_map:
         logger.warning("[POLY] 0 markets — verify slug patterns and threshold config")

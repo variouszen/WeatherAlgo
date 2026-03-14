@@ -1,7 +1,7 @@
 # backend/api/main.py
 import logging
 import asyncio
-from datetime import datetime, date
+from datetime import datetime, date, timezone, timedelta
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -138,7 +138,7 @@ async def reset_bankroll_endpoint():
             old_balance = bankroll_state.balance
             bankroll_state.balance = STARTING_BANKROLL
             bankroll_state.daily_loss_today = 0.0
-            bankroll_state.last_reset_date = date.today().isoformat()
+            bankroll_state.last_reset_date = datetime.now(timezone.utc).date().isoformat()
     return {
         "status": "reset",
         "previous_balance": old_balance,
@@ -152,11 +152,10 @@ async def reset_daily_loss_endpoint():
     async with AsyncSessionLocal() as session:
         async with session.begin():
             from core.signals import get_bankroll
-            from datetime import date
             bankroll_state = await get_bankroll(session)
             old_val = bankroll_state.daily_loss_today
             bankroll_state.daily_loss_today = 0.0
-            bankroll_state.last_reset_date = date.today().isoformat()
+            bankroll_state.last_reset_date = datetime.now(timezone.utc).date().isoformat()
     return {"status": "reset", "previous_daily_loss": old_val, "now": 0.0}
 
 
@@ -202,8 +201,6 @@ async def purge_stale_trades():
     Uses trade.market_date directly — no title/condition parsing.
     Also refunds position size back to bankroll.
     """
-    from datetime import datetime, timezone
-
     today = datetime.now(timezone.utc).date()
     purged = []
     kept = []
@@ -271,7 +268,7 @@ async def purge_stale_trades():
 async def delete_specific_trades():
     """
     One-time cleanup — delete specific bad trades by ID and refund bankroll.
-    Hardcoded to IDs: 78, 80, 81, 82, 83
+    Currently set to [87] (Dallas positional indexing artifact — already executed).
     """
     trade_ids = [87]
     async with AsyncSessionLocal() as session:
@@ -319,7 +316,7 @@ async def delete_specific_trades():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "dry_run": DRY_RUN, "timestamp": datetime.utcnow().isoformat()}
+    return {"status": "ok", "dry_run": DRY_RUN, "timestamp": datetime.now(timezone.utc).isoformat()}
 
 
 @app.post("/api/scan")
@@ -549,6 +546,8 @@ def _trade_to_dict(t: Trade) -> dict:
         "net_pnl": t.net_pnl,
         "bankroll_after": t.bankroll_after,
         "forecast_error_f": t.forecast_error_f,
+        "forecast_day_offset": t.forecast_day_offset,
+        "entry_number": t.entry_number,
         "opened_at": t.opened_at.isoformat() if t.opened_at else None,
         "resolved_at": t.resolved_at.isoformat() if t.resolved_at else None,
         "polymarket_market_id": t.polymarket_market_id,
@@ -571,9 +570,8 @@ def _scan_log_to_dict(s: ScanLog) -> dict:
 
 async def _purge_old_bucket_diagnostics():
     """Delete bucket_mapping_diagnostics rows older than 7 days. Safe to call on startup."""
-    from datetime import timedelta
     from sqlalchemy import delete
-    cutoff = datetime.utcnow() - timedelta(days=7)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
     try:
         async with AsyncSessionLocal() as session:
             async with session.begin():
@@ -595,7 +593,6 @@ async def bucket_mapping_summary():
     Daily summary of bucket mapping diagnostics.
     Returns counts by match type, avg prob gap, and top 10 mismatches.
     """
-    from datetime import timezone
 
     async with AsyncSessionLocal() as session:
         now_utc = datetime.now(timezone.utc)
@@ -692,7 +689,6 @@ async def debug_markets():
     Shows exactly what build_market_map would find.
     """
     from data.polymarket import build_slug, fetch_event_by_slug, CITY_SLUGS, MAX_FORWARD_DAYS
-    from datetime import timezone, timedelta
 
     utc_today = datetime.now(timezone.utc).date()
     results = {}

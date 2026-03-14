@@ -72,6 +72,10 @@ BOT_CONFIG = {
     "max_open_per_city": 1,
     "max_correlated_yes": 3,
 
+    # --- Multi-day city caps ---
+    "max_positions_per_city": 3,    # hard cap: total open trades per city across all dates
+    "max_city_exposure_pct": 0.06,  # max combined position_size_usd per city as % of bankroll
+
     # --- Circuit breakers ---
     "daily_loss_cap_pct": 0.05,
     "bankroll_floor": 200.0,
