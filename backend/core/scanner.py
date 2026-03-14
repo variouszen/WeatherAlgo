@@ -522,8 +522,7 @@ async def run_scan() -> dict:
                             best_per_city_date[cd_key] = signal_info
                         log(
                             f"SIGNAL {city} | MarketDate={market_date_str} | Bucket=>={threshold}{unit} {direction} | "
-                            f"Primary={primary_forecast:.1f} GFS={f'{gfs_forecast:.1f}' if gfs_forecast is not None else 'N/A'} "
-                            f"ICON={f'{icon_forecast:.1f}' if icon_forecast is not None else 'N/A'} | "
+                            f"{f.get('source','Primary')}={primary_forecast:.1f} GFS={f'{gfs_forecast:.1f}' if gfs_forecast is not None else 'N/A'} | "
                             f"Edge={edge:.1%} Models={sizing.get('models_agreed','?')} "
                             f"EventVol=${event_vol:,.0f} BucketVol=${bucket_vol:,.0f} "
                             f"{sizing.get('spread_note','')} "
