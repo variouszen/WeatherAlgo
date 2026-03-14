@@ -102,15 +102,15 @@ CITIES = [
     {"name": "New York",      "lat": 40.7128,  "lon": -74.0060,  "station": "KLGA", "emoji": "🗽",  "celsius": False, "timezone": "America/New_York"},
     {"name": "Chicago",       "lat": 41.8781,  "lon": -87.6298,  "station": "KORD", "emoji": "🌬️", "celsius": False, "timezone": "America/Chicago"},
     {"name": "Seattle",       "lat": 47.6062,  "lon": -122.3321, "station": "KSEA", "emoji": "🌧️", "celsius": False, "timezone": "America/Los_Angeles"},
-    {"name": "Atlanta",       "lat": 33.7490,  "lon": -84.3880,  "station": "KFTY", "emoji": "🍑",  "celsius": False, "timezone": "America/New_York"},
-    {"name": "Dallas",        "lat": 32.7767,  "lon": -96.7970,  "station": "KDFW", "emoji": "🤠",  "celsius": False, "timezone": "America/Chicago"},
+    {"name": "Atlanta",       "lat": 33.6367,  "lon": -84.4279,  "station": "KATL", "emoji": "🍑",  "celsius": False, "timezone": "America/New_York"},
+    {"name": "Dallas",        "lat": 32.8471,  "lon": -96.8518,  "station": "KDAL", "emoji": "🤠",  "celsius": False, "timezone": "America/Chicago"},
     {"name": "Miami",         "lat": 25.7617,  "lon": -80.1918,  "station": "KMIA", "emoji": "🌴",  "celsius": False, "timezone": "America/New_York"},
     # ── Europe (3) — ICON primary + GFS validator ─────────────────────────────
     {"name": "London",        "lat": 51.5033,  "lon": 0.0550,    "station": "EGLC", "emoji": "🎡",  "celsius": True, "timezone": "Europe/London"},
     {"name": "Paris",         "lat": 48.8566,  "lon": 2.3522,    "station": "LFPG", "emoji": "🗼",  "celsius": True, "timezone": "Europe/Paris"},
     {"name": "Munich",        "lat": 48.1351,  "lon": 11.5820,   "station": "EDDM", "emoji": "🍺",  "celsius": True, "timezone": "Europe/Berlin"},
     # ── East Asia (3) — JMA primary + GFS validator ───────────────────────────
-    {"name": "Seoul",         "lat": 37.5665,  "lon": 126.9780,  "station": "RKSS", "emoji": "🏮",  "celsius": True, "timezone": "Asia/Seoul",     "primary_model": "jma_seamless", "primary_label": "JMA"},
+    {"name": "Seoul",         "lat": 37.4602,  "lon": 126.4407,  "station": "RKSI", "emoji": "🏮",  "celsius": True, "timezone": "Asia/Seoul",     "primary_model": "jma_seamless", "primary_label": "JMA"},
     {"name": "Tokyo",         "lat": 35.5494,  "lon": 139.7798,  "station": "RJTT", "emoji": "🏯",  "celsius": True, "timezone": "Asia/Tokyo",     "primary_model": "jma_seamless", "primary_label": "JMA"},
     {"name": "Shanghai",      "lat": 31.1443,  "lon": 121.8083,  "station": "ZSPD", "emoji": "🏙️", "celsius": True, "timezone": "Asia/Shanghai",  "primary_model": "jma_seamless", "primary_label": "JMA"},
     # To add new regions later, add "primary_model" / "primary_label" overrides:

@@ -173,7 +173,6 @@ function isIntlTrade(t) {
 
 function isFlagged(t) {
   if (Math.abs(t.forecast_error_f || 0) > 8) return 'date-offset';
-  if (t.city === 'Atlanta' && t.station === 'KFTY') return 'station-bias';
   // Premature settlement: resolved before 8PM UTC on market_date
   if (t.resolved_at && t.market_date) {
     const resolved = new Date(t.resolved_at);
