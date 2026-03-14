@@ -489,6 +489,7 @@ async def run_scan() -> dict:
                         open_yes_positions=open_yes_count,
                         market_date=market_date_str,
                         primary_forecast=primary_forecast,
+                        primary_source=f.get("source"),
                         is_celsius=is_celsius,
                         gfs_forecast=gfs_forecast,
                         ecmwf_forecast=ecmwf_forecast,

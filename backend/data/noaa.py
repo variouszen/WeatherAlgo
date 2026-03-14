@@ -574,13 +574,69 @@ async def fetch_ecmwf_forecast_high(
     Fetch forecast high from ECMWF IFS model via Open-Meteo.
     ECMWF is generally the most accurate global model for 1-5 day forecasts.
     Returns °F for US cities (celsius=False) or °C for international (celsius=True).
+
+    Strategy: try hourly endpoint first (compute daily max from hourly temps),
+    fall back to daily endpoint. The daily endpoint often returns NULL highs
+    while hourly data is available.
     """
     from datetime import timedelta, date, datetime as _datetime, timezone as _tz
-    # Use UTC explicitly — no pytz required, avoids drift warnings on Railway
     utc_now = _datetime.now(_tz.utc)
     target_date = (utc_now.date() + timedelta(days=day_offset)).isoformat()
 
-    for attempt in range(3):
+    # ── Attempt 1: Hourly endpoint → compute daily max ────────────────────────
+    for attempt in range(2):
+        try:
+            async with httpx.AsyncClient() as client:
+                r = await client.get(
+                    f"{OPEN_METEO_BASE}/forecast",
+                    params={
+                        "latitude": lat,
+                        "longitude": lon,
+                        "hourly": "temperature_2m",
+                        "temperature_unit": "celsius",
+                        "timezone": "UTC",
+                        "start_date": target_date,
+                        "end_date": target_date,
+                        "models": "ecmwf_ifs04",
+                    },
+                    timeout=15.0,
+                )
+                if r.status_code in (429, 504):
+                    await asyncio.sleep((attempt + 1) * 3)
+                    continue
+                r.raise_for_status()
+                data = r.json()
+                hours = data.get("hourly", {}).get("time", [])
+                temps = data.get("hourly", {}).get("temperature_2m", [])
+
+                # Filter valid (non-null) temps for the target date
+                valid_temps = [
+                    float(t) for h, t in zip(hours, temps)
+                    if t is not None and h[:10] == target_date
+                ]
+                if valid_temps:
+                    high_c = max(valid_temps)
+                    result = round(high_c, 1) if celsius else round(high_c * 9 / 5 + 32, 1)
+                    logger.info(
+                        f"[ECMWF-hourly] ({lat},{lon}) {target_date}: "
+                        f"max of {len(valid_temps)} hourly readings = {high_c:.1f}°C → "
+                        f"{result:.1f}{'°C' if celsius else '°F'}"
+                    )
+                    return result
+                else:
+                    null_count = sum(1 for h, t in zip(hours, temps) if h[:10] == target_date and t is None)
+                    logger.info(
+                        f"[ECMWF-hourly] ({lat},{lon}) {target_date}: "
+                        f"no valid hourly temps ({null_count} null, {len(hours)} total hours) — trying daily"
+                    )
+                    break  # fall through to daily attempt
+        except Exception as e:
+            logger.warning(f"[ECMWF-hourly] ({lat},{lon}) attempt {attempt+1} failed: {e}")
+            if attempt < 1:
+                await asyncio.sleep((attempt + 1) * 3)
+
+    # ── Attempt 2: Daily endpoint (original method) ───────────────────────────
+    for attempt in range(2):
         try:
             async with httpx.AsyncClient() as client:
                 r = await client.get(
@@ -607,25 +663,25 @@ async def fetch_ecmwf_forecast_high(
                     if d == target_date and h is not None:
                         high_c = float(h)
                         result = round(high_c, 1) if celsius else round(high_c * 9 / 5 + 32, 1)
-                        logger.info(f"[ECMWF] ({lat},{lon}) {target_date}: {high_c:.1f}°C → {result:.1f}{'°C' if celsius else '°F'}")
+                        logger.info(f"[ECMWF-daily] ({lat},{lon}) {target_date}: {high_c:.1f}°C → {result:.1f}{'°C' if celsius else '°F'}")
                         return result
 
-                # Diagnostic: log what dates WERE available and if target had null high
+                # Diagnostic: log failure details
                 null_dates = [d for d, h in zip(dates, highs) if d == target_date and h is None]
                 if null_dates:
                     logger.warning(
-                        f"[ECMWF] ({lat},{lon}) {target_date}: date found but high is NULL | "
+                        f"[ECMWF-daily] ({lat},{lon}) {target_date}: date found but high is NULL | "
                         f"available dates={dates} | highs={highs}"
                     )
                 else:
                     logger.warning(
-                        f"[ECMWF] ({lat},{lon}) {target_date}: date not in response | "
+                        f"[ECMWF-daily] ({lat},{lon}) {target_date}: date not in response | "
                         f"available dates={dates} | forecast_days={max(3, day_offset + 2)}"
                     )
                 return None
         except Exception as e:
-            logger.warning(f"[ECMWF] ({lat},{lon}) attempt {attempt+1} failed: {e}")
-            if attempt < 2:
+            logger.warning(f"[ECMWF-daily] ({lat},{lon}) attempt {attempt+1} failed: {e}")
+            if attempt < 1:
                 await asyncio.sleep((attempt + 1) * 3)
     return None
 

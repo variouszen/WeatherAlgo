@@ -59,6 +59,7 @@ def evaluate_signal(
     volume: float = 0.0,              # kept for API compatibility — not used in filter logic
     # Forecast values for directional gate + consensus
     primary_forecast: float = None,     # NOAA for US, ECMWF for intl
+    primary_source: str = None,         # "NOAA/NWS", "ECMWF", or "Open-Meteo-GFS"
     is_celsius: bool = False,
     # Model consensus
     gfs_forecast: float = None,
@@ -165,7 +166,16 @@ def evaluate_signal(
     consensus_factor = 1.0
     spread_note = ""
 
-    all_forecasts = [f for f in [primary_forecast, gfs_forecast, ecmwf_forecast] if f is not None]
+    # If primary source is GFS-based (intl fallback), exclude GFS validator
+    # to prevent pseudo-consensus from GFS agreeing with itself.
+    primary_is_gfs = primary_source and "GFS" in primary_source.upper()
+    if primary_is_gfs and gfs_forecast is not None:
+        # GFS validator is same source family as primary — not independent
+        independent_validators = [f for f in [ecmwf_forecast] if f is not None]
+        all_forecasts = [f for f in [primary_forecast] + independent_validators if f is not None]
+        spread_note = " [GFS-primary: validator excluded]"
+    else:
+        all_forecasts = [f for f in [primary_forecast, gfs_forecast, ecmwf_forecast] if f is not None]
 
     if len(all_forecasts) >= 2:
         # Count how many models agree on direction using prob_above, not raw comparison.
@@ -189,7 +199,6 @@ def evaluate_signal(
         # Check max spread between any two models — wide spread reduces size, not a veto
         max_spread = cfg["max_model_spread_c"] if is_celsius else cfg["max_model_spread_f"]
         spread = max(all_forecasts) - min(all_forecasts)
-        spread_note = ""
         if spread > max_spread:
             consensus_factor = cfg["consensus_reduced_factor"]
             spread_note = f" [spread={spread:.1f}>{max_spread}->reduced]"
@@ -203,6 +212,13 @@ def evaluate_signal(
             return False, (
                 f"No model consensus: only {models_agreed}/{total_models} agree on direction"
             ), {}
+    elif primary_is_gfs:
+        # Single-model: GFS-fallback primary with no independent validator.
+        # Still trade but at reduced size — no second opinion available.
+        consensus_factor = cfg["consensus_reduced_factor"]
+        models_agreed = 1
+        if not spread_note:
+            spread_note = " [1-model: GFS-primary, no independent validator]"
 
     # ── Compute sizing ───────────────────────────────────────────────────────────
     sizing = compute_kelly_size(edge, entry_price, confidence, bankroll, open_yes_positions)
@@ -361,7 +377,7 @@ async def settle_trade(
 
     trade.status = status
     trade.actual_high_f = actual_high_f  # may be None if only Polymarket-resolved
-    trade.resolved_at = datetime.now(timezone.utc)
+    trade.resolved_at = datetime.now(timezone.utc).replace(tzinfo=None)  # naive to match DB column
     trade.gross_pnl = gross_pnl
     trade.fees_usd = fees
     trade.net_pnl = net_pnl

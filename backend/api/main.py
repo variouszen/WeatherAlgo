@@ -571,7 +571,9 @@ def _scan_log_to_dict(s: ScanLog) -> dict:
 async def _purge_old_bucket_diagnostics():
     """Delete bucket_mapping_diagnostics rows older than 7 days. Safe to call on startup."""
     from sqlalchemy import delete
-    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    # scanned_at is stored as naive datetime in DB (DateTime without timezone=True),
+    # so cutoff must also be naive to avoid "can't subtract offset-naive and offset-aware" error.
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=7)
     try:
         async with AsyncSessionLocal() as session:
             async with session.begin():
@@ -597,7 +599,7 @@ async def bucket_mapping_summary():
     async with AsyncSessionLocal() as session:
         now_utc = datetime.now(timezone.utc)
         today_str = now_utc.date().isoformat()
-        day_start = datetime(now_utc.year, now_utc.month, now_utc.day, tzinfo=timezone.utc)
+        day_start = datetime(now_utc.year, now_utc.month, now_utc.day)  # naive to match DB column
 
         result = await session.execute(
             select(BucketMappingDiagnostic)
