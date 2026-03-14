@@ -85,8 +85,13 @@ def parse_high_low(periods: list, day_offset: int = 0, target_date: str = None) 
     If target_date (YYYY-MM-DD) is provided, match by startTime date string
     instead of positional indexing — prevents off-by-one when NWS period
     boundaries shift between scans.
-    Falls back to positional indexing if target_date is not provided or
-    no date match is found.
+
+    When target_date is provided and no match is found, returns high=None
+    so the caller skips this city-date. Does NOT fall back to positional
+    indexing — that was the root cause of Dallas #87 and Atlanta #89.
+
+    Positional indexing is only used when target_date is not provided
+    (backward compat for direct callers outside the scanner).
     """
     day_periods   = [p for p in periods if p.get("isDaytime", False)]
     night_periods = [p for p in periods if not p.get("isDaytime", False)]
@@ -97,8 +102,6 @@ def parse_high_low(periods: list, day_offset: int = 0, target_date: str = None) 
         "detailed_forecast": "",
     }
 
-    matched = False
-
     if target_date:
         # Date-matched (reliable) — match startTime against target_date
         for dp in day_periods:
@@ -107,7 +110,6 @@ def parse_high_low(periods: list, day_offset: int = 0, target_date: str = None) 
                 result["high"] = float(dp["temperature"])
                 result["high_label"] = dp.get("name", "")
                 result["detailed_forecast"] = dp.get("detailedForecast", "")
-                matched = True
                 break
         for np_ in night_periods:
             start = np_.get("startTime", "")
@@ -115,15 +117,20 @@ def parse_high_low(periods: list, day_offset: int = 0, target_date: str = None) 
                 result["low"] = float(np_["temperature"])
                 result["low_label"] = np_.get("name", "")
                 break
-        if matched:
-            return result
-        else:
-            logger.warning(
-                f"[NOAA] No period matched target_date={target_date}, "
-                f"falling back to positional index (day_offset={day_offset})"
-            )
 
-    # Positional fallback (legacy behavior)
+        if result["high"] is None:
+            available_dates = sorted(set(
+                dp.get("startTime", "")[:10] for dp in day_periods if dp.get("startTime")
+            ))
+            logger.warning(
+                f"[NOAA] No period matched target_date={target_date} — "
+                f"returning None (safe skip). Available dates: {available_dates}"
+            )
+        return result
+
+    # Positional fallback — ONLY when target_date was not provided.
+    # The scanner always provides target_date, so this path only fires
+    # from direct callers (e.g. fetch_all_cities backward compat).
     if len(day_periods) > day_offset:
         dp = day_periods[day_offset]
         result["high"] = float(dp["temperature"])

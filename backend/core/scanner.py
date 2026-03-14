@@ -133,7 +133,7 @@ async def fetch_validator_forecasts(city_cfg: dict, day_offset: int = 0) -> dict
     # would double-count ECMWF in consensus and inflate agreement artificially.
     ecmwf = None
     if not is_celsius:
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(1.5)  # stagger to avoid Open-Meteo 429s
         ecmwf = await fetch_ecmwf_forecast_high(lat, lon, day_offset, is_celsius, tz)
 
     return {"gfs": gfs, "ecmwf": ecmwf}
@@ -219,11 +219,18 @@ async def run_scan() -> dict:
 
             try:
                 async with _httpx.AsyncClient() as _client:
+                    fetch_idx = 0
                     for city_name, date_strs in city_dates.items():
                         city_cfg = city_by_name.get(city_name)
                         if not city_cfg:
                             continue
+                        is_intl = city_cfg.get("celsius", False)
                         for date_str in date_strs:
+                            # Stagger Open-Meteo calls to avoid 429s.
+                            # International primary hits Open-Meteo (ECMWF/GFS);
+                            # US primary hits NWS (different API, no shared rate limit).
+                            if fetch_idx > 0 and is_intl:
+                                await asyncio.sleep(1.5)
                             offset = city_date_offset.get((city_name, date_str), 0)
                             try:
                                 result = await _fetch_city_forecast(
@@ -231,10 +238,15 @@ async def run_scan() -> dict:
                                 )
                                 if isinstance(result, dict):
                                     forecast_map[(city_name, date_str)] = result
+                                    unit = result.get("unit", "?")
+                                    source = result.get("source", "unknown")
+                                    high = result.get("forecast_high")
+                                    log(f"Primary {city_name}/{date_str}: {high}°{unit} via {source}")
                                 else:
                                     log(f"Forecast failed for {city_name}/{date_str}: {result}", "WARN")
                             except Exception as e:
                                 log(f"Forecast failed for {city_name}/{date_str}: {e}", "WARN")
+                            fetch_idx += 1
 
                 scan_result["cities_scanned"] = len(set(c for c, _ in forecast_map))
                 log(f"Primary forecasts: {len(forecast_map)} city-date pairs across {scan_result['cities_scanned']} cities")
@@ -253,7 +265,7 @@ async def run_scan() -> dict:
                     continue
                 for date_str in date_strs:
                     if fetch_count > 0:
-                        await asyncio.sleep(0.5)
+                        await asyncio.sleep(1.5)  # stagger to avoid Open-Meteo 429s
                     offset = city_date_offset.get((city_name, date_str), 0)
                     try:
                         validators = await fetch_validator_forecasts(city_cfg, day_offset=offset)
