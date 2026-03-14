@@ -444,6 +444,27 @@ async def run_scan() -> dict:
                     noaa_prob = round(_prob_above_fn(threshold, primary_forecast, f["sigma"]), 4)
                     direction = "YES" if noaa_prob > yes_price else "NO"
 
+                    # ── Raw directional gate (day-0 only) ─────────────────────────
+                    # Day-0: forecast must support the bet direction.
+                    # YES requires forecast ABOVE threshold.
+                    # NO requires forecast BELOW threshold.
+                    # Equality = no conviction → skip.
+                    # Day+1/+2: uses the existing probability-based gate in signals.py.
+                    is_day0 = f.get("day_offset", 0) == 0
+                    forecast_vs_threshold = round(primary_forecast - threshold, 2)
+
+                    if is_day0:
+                        if direction == "YES" and primary_forecast <= threshold:
+                            log(f"SKIP {city} | MarketDate={market_date_str} | Bucket=>={threshold}{unit} | "
+                                f"Day-0 raw gate: forecast {primary_forecast} not above threshold {threshold} "
+                                f"(diff={forecast_vs_threshold}) — cannot support YES | gate_mode=raw_day0")
+                            continue
+                        if direction == "NO" and primary_forecast >= threshold:
+                            log(f"SKIP {city} | MarketDate={market_date_str} | Bucket=>={threshold}{unit} | "
+                                f"Day-0 raw gate: forecast {primary_forecast} not below threshold {threshold} "
+                                f"(diff={forecast_vs_threshold}) — cannot support NO | gate_mode=raw_day0")
+                            continue
+
                     end_date_str = market_data.get("end_date", "")
                     is_early = _is_early_window(end_date_str)
 
