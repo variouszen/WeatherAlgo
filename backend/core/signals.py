@@ -273,7 +273,13 @@ async def open_paper_trade(
 ) -> Trade:
     size = sizing["size_usd"]
     entry_price = market_data["yes_price"] if direction == "YES" else (1 - market_data["yes_price"])
-    noaa_prob = noaa_data["bucket_probs"][threshold]
+    # Dynamic threshold support: compute prob on the fly if not in pre-computed dict.
+    # Pre-computed bucket_probs only covers static TEMP_THRESHOLDS; dynamic thresholds
+    # from live Polymarket buckets may not be in the dict.
+    noaa_prob = noaa_data.get("bucket_probs", {}).get(threshold)
+    if noaa_prob is None:
+        from data.noaa import prob_above
+        noaa_prob = round(prob_above(threshold, noaa_data["forecast_high"], noaa_data["sigma"]), 4)
     edge = abs(noaa_prob - market_data["yes_price"])
     unit = noaa_data.get("unit", "F")
 

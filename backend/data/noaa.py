@@ -297,6 +297,8 @@ async def fetch_city_forecast(city: dict, day_offset: int, client: httpx.AsyncCl
         confidence = compute_confidence(sigma, is_celsius=True)
         current_obs = await get_openmeteo_observation(lat, lon, client)
 
+        # bucket_probs: pre-computed at static thresholds for dashboard/API use only.
+        # Live trading computes prob_above() on the fly at dynamic Polymarket thresholds.
         bucket_probs = {t: round(prob_above(t, forecast_high, sigma), 4) for t in thresholds}
 
         return {
@@ -341,6 +343,8 @@ async def fetch_city_forecast(city: dict, day_offset: int, client: httpx.AsyncCl
         sigma = compute_sigma(day_offset, is_celsius=False)
         confidence = compute_confidence(sigma, is_celsius=False)
 
+        # bucket_probs: pre-computed at static thresholds for dashboard/API use only.
+        # Live trading computes prob_above() on the fly at dynamic Polymarket thresholds.
         bucket_probs = {
             t: round(prob_above(t, temps["high"], sigma), 4)
             for t in TEMP_THRESHOLDS_F

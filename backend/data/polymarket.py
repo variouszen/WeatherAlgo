@@ -414,7 +414,6 @@ async def _process_city_date(
     city: str,
     target_date: date,
     unit: str,
-    thresholds: list[float],
     client: httpx.AsyncClient,
     market_map: dict,
     city_date_map: set,
@@ -454,10 +453,14 @@ async def _process_city_date(
 
         parsed = parse_bucket_range(label)
         if parsed is None:
-            logger.debug(f"[POLY] Unparseable bucket '{label}' — skip bucket")
+            logger.info(f"[POLY] Bucket parse: \"{label}\" → None → REJECTED (unparseable)")
             continue
 
         lo, hi = parsed
+        hi_str = "None" if hi is None else f"{hi}"
+        lo_str = "-inf" if lo == float("-inf") else f"{lo}"
+        logger.debug(f"[POLY] Bucket parse: \"{label}\" → ({lo_str}, {hi_str}) → accepted")
+
         price = await _extract_bucket_price(nm, client)
         if price is None:
             logger.debug(
@@ -487,20 +490,42 @@ async def _process_city_date(
         )
         return False
 
-    # ── Direct-threshold filtering ────────────────────────────────
-    direct_thresholds = get_direct_thresholds(buckets, thresholds)
+    # ── Dynamic threshold extraction ─────────────────────────────
+    # Use ALL real bucket lower-bounds as tradeable thresholds.
+    # Polymarket is the sole source of truth for what's tradeable.
+    # No static list filtering — whatever Polymarket offers, the bot sees.
+    raw_bounds = [b["low"] for b in buckets if b["low"] != float("-inf")]
+    direct_thresholds = sorted(set(raw_bounds))
+
     if not direct_thresholds:
         logger.warning(
-            f"[POLY] No direct threshold matches for {city}/{target_date} "
-            f"| bucket bounds: "
-            f"{sorted(b['low'] for b in buckets if b['low'] != float('-inf'))} "
-            f"| candidates (first 8): {thresholds[:8]}"
+            f"[POLY] No bucket lower-bounds found for {city}/{target_date} "
+            f"| buckets: {len(buckets)}"
         )
         return False
 
+    # ── Structural anomaly warnings (log only, never skip) ────────
+    if len(raw_bounds) != len(set(raw_bounds)):
+        logger.warning(
+            f"[POLY] ⚠ ANOMALY {city}/{market_date_str}: duplicate bounds detected "
+            f"(raw={raw_bounds}, deduplicated={direct_thresholds})"
+        )
+    if raw_bounds != sorted(raw_bounds):
+        logger.warning(
+            f"[POLY] ⚠ ANOMALY {city}/{market_date_str}: non-monotonic bounds "
+            f"(raw={raw_bounds}, sorted={direct_thresholds})"
+        )
+    has_lower_tail = any(b["low"] == float("-inf") for b in buckets)
+    has_upper_tail = any(b["high"] is None for b in buckets)
+    if not has_lower_tail:
+        logger.warning(f"[POLY] ⚠ ANOMALY {city}/{market_date_str}: no open-lower tail bucket found")
+    if not has_upper_tail:
+        logger.warning(f"[POLY] ⚠ ANOMALY {city}/{market_date_str}: no open-upper tail bucket found")
+
     logger.info(
         f"[POLY] ✓ {city}/{market_date_str} | {len(buckets)} buckets | "
-        f"{len(direct_thresholds)} direct thresholds | "
+        f"{len(direct_thresholds)} thresholds (dynamic) | "
+        f"bounds={direct_thresholds} | "
         f"EventVol=${event_volume:,.0f} BucketsVol=${total_volume:,.0f} | slug={slug}"
     )
 
@@ -533,15 +558,14 @@ async def _process_city_date(
 
 async def build_market_map(
     cities: list[str],
-    thresholds: list[float],
 ) -> tuple[dict, set]:
     """
     Returns:
         market_map    {(city, market_date_str, threshold): market_data}
         city_date_map set of (city, market_date_str) pairs
 
-    Key uses 3-tuple to prevent date collision. Only direct-threshold entries
-    are added — no synthetic interpolation fires from this map.
+    Tradeable thresholds are extracted dynamically from Polymarket's actual
+    bucket structure — no static threshold list filtering.
 
     Multi-day: scans today AND tomorrow per city. Both can succeed.
     Day+2 is fallback only — used when neither today nor tomorrow has a valid market.
@@ -564,7 +588,7 @@ async def build_market_map(
             for day_offset in range(min(2, MAX_FORWARD_DAYS)):
                 target_date = utc_today + timedelta(days=day_offset)
                 success = await _process_city_date(
-                    city, target_date, unit, thresholds,
+                    city, target_date, unit,
                     client, market_map, city_date_map,
                 )
                 if success:
@@ -574,7 +598,7 @@ async def build_market_map(
             if not found_primary and MAX_FORWARD_DAYS > 2:
                 target_date = utc_today + timedelta(days=2)
                 await _process_city_date(
-                    city, target_date, unit, thresholds,
+                    city, target_date, unit,
                     client, market_map, city_date_map,
                 )
 

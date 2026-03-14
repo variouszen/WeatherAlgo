@@ -7,10 +7,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import sys, os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import BOT_CONFIG, CITIES, TEMP_THRESHOLDS_F, TEMP_THRESHOLDS_C, TEMP_THRESHOLDS
+from config import BOT_CONFIG, CITIES
 from data.noaa import (
     get_nws_daily_high, get_openmeteo_daily_high,
-    fetch_gfs_forecast_high
+    fetch_gfs_forecast_high, prob_above as _prob_above_fn
 )
 from data.polymarket import build_market_map
 from core.signals import (
@@ -174,7 +174,7 @@ async def run_scan() -> dict:
             # have active markets and can fetch forecasts for each one.
             log("Fetching Polymarket prices...")
             try:
-                market_map, city_date_map = await build_market_map(city_names, TEMP_THRESHOLDS_F + TEMP_THRESHOLDS_C)
+                market_map, city_date_map = await build_market_map(city_names)
                 cities_found = len(set(c for c, _ in city_date_map))
                 log(f"Polymarket: {len(market_map)} direct city/date/threshold entries across {cities_found} cities, {len(city_date_map)} city-date pairs")
             except Exception as e:
@@ -387,8 +387,15 @@ async def run_scan() -> dict:
                 if not city_cfg_item:
                     continue
                 is_celsius = city_cfg_item.get("celsius", False)
-                thresholds_for_city = TEMP_THRESHOLDS_C if is_celsius else TEMP_THRESHOLDS_F
                 unit = "C" if is_celsius else "F"
+
+                # ── Dynamic thresholds: use what Polymarket actually offers ──
+                # Polymarket is the sole source of tradeable thresholds.
+                # No static TEMP_THRESHOLDS_F/C filtering.
+                thresholds_for_city = sorted(
+                    thresh for (c, d, thresh) in market_map
+                    if c == city and d == market_date_str
+                )
 
                 # ── City-wide hard cap check (before evaluating any threshold) ──
                 if open_city_total.get(city, 0) >= cfg["max_positions_per_city"]:
@@ -412,12 +419,11 @@ async def run_scan() -> dict:
 
                 for threshold in thresholds_for_city:
                     mkt_key = (city, market_date_str, threshold)
-                    if mkt_key not in market_map:
-                        continue
-
                     market_data = market_map[mkt_key]
                     yes_price = market_data["yes_price"]
-                    noaa_prob = f["bucket_probs"].get(threshold, 0)
+                    # Compute probability on the fly from continuous forecast distribution.
+                    # Works for ANY threshold — not limited to pre-computed bucket_probs.
+                    noaa_prob = round(_prob_above_fn(threshold, primary_forecast, f["sigma"]), 4)
                     direction = "YES" if noaa_prob > yes_price else "NO"
 
                     end_date_str = market_data.get("end_date", "")

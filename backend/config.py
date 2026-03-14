@@ -127,6 +127,11 @@ for _city in CITIES:
     else:
         CITY_MODEL_TIER[_city["name"]] = _city.get("primary_label", INTL_DEFAULT_LABEL)
 
+# ── Static thresholds — DASHBOARD / ANALYTICS ONLY ───────────────────────────
+# These lists are NOT used for live trading. Live trading thresholds are
+# extracted dynamically from Polymarket's actual bucket structure per city/day.
+# These remain for: dashboard charts, historical analysis, noaa.py bucket_probs
+# pre-computation (API endpoints), and backward compatibility.
 TEMP_THRESHOLDS_F = [40, 45, 50, 55, 60, 62, 64, 65, 66, 67, 68, 69, 70, 72, 75, 80, 85, 90]
 TEMP_THRESHOLDS_C = [-5, 0, 2, 4, 5, 6, 7, 8, 9, 10, 12, 14, 15, 16, 17, 18, 20, 22, 25, 28, 30]
 TEMP_THRESHOLDS = TEMP_THRESHOLDS_F
