@@ -8,16 +8,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import sys, os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import BOT_CONFIG, FORECAST_EDGE_CONFIG, CITIES, STRATEGY_BANKROLL_ID
+from config import BOT_CONFIG, FORECAST_EDGE_CONFIG, SPECTRUM_CONFIG, CITIES, STRATEGY_BANKROLL_ID
 from data.noaa import (
     get_nws_daily_high, get_openmeteo_daily_high,
-    fetch_gfs_forecast_high, prob_above as _prob_above_fn
+    fetch_gfs_forecast_high, prob_above as _prob_above_fn,
+    compute_bucket_probabilities, cumulative_from_buckets,
 )
 from data.polymarket import build_market_map
 from core.signals import (
     get_bankroll, get_open_positions,
-    open_paper_trade, settle_trade,
-    evaluate_signal, evaluate_signal_forecast_edge,
+    open_paper_trade, open_spectrum_trade, settle_trade,
+    evaluate_signal, evaluate_signal_forecast_edge, evaluate_signal_spectrum,
     compute_forecast_analytics,
     log_calibration, reset_daily_loss,
 )
@@ -112,9 +113,10 @@ async def fetch_validator_forecasts(city_cfg, day_offset=0):
 
 async def run_scan():
     """
-    Full scan cycle — dual strategy execution.
+    Full scan cycle — triple strategy execution.
     Shared pipeline: market fetch, forecast fetch, settlement.
-    Then fork: evaluate Strategy B (sigma) and Strategy A (forecast_edge) independently.
+    Then fork: evaluate Strategy B (sigma), Strategy A (forecast_edge),
+    and Strategy C (spectrum) independently.
     """
     start_ms = int(time.time() * 1000)
     scan_result = {
@@ -130,21 +132,24 @@ async def run_scan():
 
     async with AsyncSessionLocal() as session:
         async with session.begin():
-            # ── Get BOTH bankroll states ──────────────────────────────────────
+            # ── Get ALL THREE bankroll states ─────────────────────────────────
             bankroll_b = await get_bankroll(session, "sigma")
             bankroll_a = await get_bankroll(session, "forecast_edge")
+            bankroll_c = await get_bankroll(session, "spectrum")
             await reset_daily_loss(session, bankroll_b)
             await reset_daily_loss(session, bankroll_a)
+            await reset_daily_loss(session, bankroll_c)
 
             cfg = BOT_CONFIG
             cfg_a = FORECAST_EDGE_CONFIG
+            cfg_c = SPECTRUM_CONFIG
 
             # Daily loss cap check (effectively disabled for paper at 100%)
-            for label, bs in [("sigma", bankroll_b), ("forecast_edge", bankroll_a)]:
-                cap = max(cfg.get("daily_loss_cap_floor_usd", 50), bs.balance * cfg["daily_loss_cap_pct"])
+            for label, bs in [("sigma", bankroll_b), ("forecast_edge", bankroll_a), ("spectrum", bankroll_c)]:
+                cap_cfg = cfg if label == "sigma" else (cfg_a if label == "forecast_edge" else cfg_c)
+                cap = max(cap_cfg.get("daily_loss_cap_floor_usd", 50), bs.balance * cap_cfg["daily_loss_cap_pct"])
                 if bs.daily_loss_today >= cap:
                     log(f"CIRCUIT BREAKER [{label}]: Daily loss ${bs.daily_loss_today:.2f} >= cap ${cap:.2f}", "WARN")
-                    # Don't return — other strategy may still trade
 
             # ── Step 1: Fetch Polymarket prices (SHARED) ─────────────────────
             log("Fetching Polymarket prices...")
@@ -237,9 +242,9 @@ async def run_scan():
                         validator_map[(city_name, date_str)] = {"gfs": None, "icon": None}
                     fetch_count += 1
 
-            # ── Step 4: Settle open positions (BOTH strategies) ──────────────
+            # ── Step 4: Settle open positions (ALL strategies) ──────────────
             all_open = await get_open_positions(session)  # all strategies
-            log(f"Open positions: {len(all_open)} (sigma: {sum(1 for t in all_open if (t.strategy or 'sigma') == 'sigma')}, forecast_edge: {sum(1 for t in all_open if t.strategy == 'forecast_edge')})")
+            log(f"Open positions: {len(all_open)} (sigma: {sum(1 for t in all_open if (t.strategy or 'sigma') == 'sigma')}, forecast_edge: {sum(1 for t in all_open if t.strategy == 'forecast_edge')}, spectrum: {sum(1 for t in all_open if t.strategy == 'spectrum')})")
 
             from data.polymarket import check_event_resolution
 
@@ -271,6 +276,8 @@ async def run_scan():
                     continue
 
                 winning_low = resolution["winning_bucket_low"]
+
+                # For A/B cumulative strategies: threshold-based win check
                 polymarket_won = (
                     (trade.direction == "YES" and winning_low >= trade.threshold_f) or
                     (trade.direction == "NO"  and winning_low < trade.threshold_f)
@@ -290,16 +297,31 @@ async def run_scan():
 
                 # Settle using the CORRECT strategy's bankroll
                 trade_strategy = trade.strategy or "sigma"
-                settle_bankroll = bankroll_b if trade_strategy == "sigma" else bankroll_a
+                if trade_strategy == "spectrum":
+                    settle_bankroll = bankroll_c
+                elif trade_strategy == "forecast_edge":
+                    settle_bankroll = bankroll_a
+                else:
+                    settle_bankroll = bankroll_b
 
-                result = await settle_trade(session, trade, settle_bankroll, actual_high_f=actual_high, polymarket_won=polymarket_won)
+                # Spectrum uses bucket-native settlement; A/B use cumulative
+                result = await settle_trade(
+                    session, trade, settle_bankroll,
+                    actual_high_f=actual_high,
+                    polymarket_won=polymarket_won,
+                    winning_bucket=resolution if trade_strategy == "spectrum" else None,
+                )
                 scan_result["trades_settled"] += 1
-                log(f"SETTLED [{trade_strategy}] {trade.city} >={trade.threshold_f}{unit} | {result['status']} | Net=${result['net_pnl']:+.2f}")
+
+                if trade_strategy == "spectrum":
+                    log(f"SETTLED [spectrum] {trade.city} {trade.bucket_label or '?'} | {result['status']} | Net=${result['net_pnl']:+.2f}")
+                else:
+                    log(f"SETTLED [{trade_strategy}] {trade.city} >={trade.threshold_f}{unit} | {result['status']} | Net=${result['net_pnl']:+.2f}")
 
                 if actual_high is not None:
                     await log_calibration(session, trade.city, city_cfg["station"], trade.noaa_forecast_high, actual_high, trade.noaa_sigma, market_date=trade.market_date)
 
-            # ── Step 5: Evaluate signals — DUAL STRATEGY ─────────────────────
+            # ── Step 5: Evaluate signals — TRIPLE STRATEGY ────────────────────
             open_after_settle = await get_open_positions(session)
 
             # Build STRATEGY-SCOPED position tracking
@@ -323,11 +345,22 @@ async def run_scan():
                 open_a_city_total[t.city] = open_a_city_total.get(t.city, 0) + 1
                 open_a_city_exposure[t.city] = open_a_city_exposure.get(t.city, 0.0) + t.position_size_usd
 
+            # Strategy C (spectrum)
+            open_c_trades = [t for t in open_after_settle if t.strategy == "spectrum"]
+            open_c_set = {(t.city, t.market_date, t.bucket_low, t.bucket_high) for t in open_c_trades}
+            open_c_city_total = {}
+            open_c_city_exposure = {}
+            for t in open_c_trades:
+                open_c_city_total[t.city] = open_c_city_total.get(t.city, 0) + 1
+                open_c_city_exposure[t.city] = open_c_city_exposure.get(t.city, 0.0) + t.position_size_usd
+
             scan_start_bankroll_b = bankroll_b.balance
             scan_start_bankroll_a = bankroll_a.balance
+            scan_start_bankroll_c = bankroll_c.balance
 
             best_per_city_date_b = {}  # Strategy B signals
             best_per_city_date_a = {}  # Strategy A signals
+            best_per_city_date_c = {}  # Strategy C signals (one best bucket per city-date)
 
             for city, market_date_str in sorted(city_date_map):
                 city_cfg_item = city_by_name.get(city, {})
@@ -336,7 +369,7 @@ async def run_scan():
                 is_celsius = city_cfg_item.get("celsius", False)
                 unit = "C" if is_celsius else "F"
 
-                # ── Noon local-time guard (SHARED — both strategies) ──────────
+                # ── Noon local-time guard (SHARED — all strategies) ───────────
                 try:
                     mkt_date = datetime.strptime(market_date_str, "%Y-%m-%d").date()
                     if mkt_date == utc_today:
@@ -361,12 +394,36 @@ async def run_scan():
                 gfs_forecast = validators.get("gfs")
                 icon_forecast = validators.get("icon")
 
+                # ══════════════════════════════════════════════════════════════
+                # LEVEL 1: Compute bucket-native probabilities ONCE per city-date
+                # Uses settlement-corrected boundaries (±0.5 rounding built in)
+                # ══════════════════════════════════════════════════════════════
+                # Get the buckets from the first market_data entry for this city-date
+                first_mkt_key = next(
+                    ((c, d, t) for (c, d, t) in market_map if c == city and d == market_date_str),
+                    None
+                )
+                raw_buckets = market_map[first_mkt_key]["buckets"] if first_mkt_key else []
+                bucket_probs = compute_bucket_probabilities(raw_buckets, primary_forecast, f["sigma"])
+
+                if bucket_probs:
+                    log(f"BUCKET-NATIVE {city}/{market_date_str} | {len(bucket_probs)} buckets | "
+                        f"Forecast={primary_forecast:.1f}{unit} σ={f['sigma']}")
+
                 for threshold in thresholds_for_city:
                     mkt_key = (city, market_date_str, threshold)
                     market_data = market_map[mkt_key]
                     yes_price = market_data["yes_price"]
-                    noaa_prob = round(_prob_above_fn(threshold, primary_forecast, f["sigma"]), 4)
+
+                    # ── Level 1: Derive cumulative P(>=threshold) from bucket probs
+                    # This replaces the old prob_above() — rounding correction is
+                    # embedded in the bucket boundaries from compute_bucket_probabilities()
+                    noaa_prob = round(cumulative_from_buckets(bucket_probs, threshold), 4)
                     direction = "YES" if noaa_prob > yes_price else "NO"
+
+                    # ── Near-boundary logging ─────────────────────────────────
+                    near_boundary = abs(primary_forecast - threshold) < 1.0
+                    boundary_flag = " ⚠️NEAR-BOUNDARY" if near_boundary else ""
 
                     # ── Shared pre-filters: liquidity ─────────────────────────
                     event_vol = market_data.get("event_volume", 0.0)
@@ -382,7 +439,7 @@ async def run_scan():
                     end_date_str = market_data.get("end_date", "")
                     is_early = _is_early_window(end_date_str)
 
-                    # Compute forecast analytics ONCE (shared by both strategies)
+                    # Compute forecast analytics ONCE (shared by all strategies)
                     fa = compute_forecast_analytics(direction, threshold, primary_forecast, gfs_forecast, is_celsius)
                     edge = abs(noaa_prob - yes_price)
 
@@ -390,7 +447,7 @@ async def run_scan():
                     is_day0 = f.get("day_offset", 0) == 0
 
                     # ══════════════════════════════════════════════════════════
-                    # STRATEGY B: Sigma evaluation
+                    # STRATEGY B: Sigma evaluation (unchanged logic, better numbers)
                     # ══════════════════════════════════════════════════════════
                     b_blocked_day0 = False
                     if is_day0:
@@ -400,7 +457,6 @@ async def run_scan():
                             b_blocked_day0 = True
 
                     if not b_blocked_day0:
-                        # City cap check for Strategy B
                         b_city_ok = (
                             open_b_city_total.get(city, 0) < cfg["max_positions_per_city"] and
                             open_b_city_exposure.get(city, 0.0) < scan_start_bankroll_b * cfg["max_city_exposure_pct"]
@@ -452,10 +508,10 @@ async def run_scan():
                                     }
                                     if cd_key not in best_per_city_date_b or score > best_per_city_date_b[cd_key].get("score", 0):
                                         best_per_city_date_b[cd_key] = sig_b
-                                    log(f"SIGNAL [sigma] {city}/{market_date_str} >={threshold}{unit} {direction} | Edge={edge:.1%} Gap={fa['forecast_gap']}")
+                                    log(f"SIGNAL [sigma] {city}/{market_date_str} >={threshold}{unit} {direction} | Edge={edge:.1%} Gap={fa['forecast_gap']}{boundary_flag}")
 
                     # ══════════════════════════════════════════════════════════
-                    # STRATEGY A: Forecast Edge evaluation
+                    # STRATEGY A: Forecast Edge evaluation (unchanged logic, better numbers)
                     # ══════════════════════════════════════════════════════════
                     a_city_ok = (
                         open_a_city_total.get(city, 0) < cfg_a["max_positions_per_city"] and
@@ -488,7 +544,95 @@ async def run_scan():
                             }
                             if cd_key_a not in best_per_city_date_a or score_a > best_per_city_date_a[cd_key_a].get("score", 0):
                                 best_per_city_date_a[cd_key_a] = sig_a
-                            log(f"SIGNAL [forecast_edge] {city}/{market_date_str} >={threshold}{unit} {direction} | Edge={edge:.1%} Gap={fa['forecast_gap']}")
+                            log(f"SIGNAL [forecast_edge] {city}/{market_date_str} >={threshold}{unit} {direction} | Edge={edge:.1%} Gap={fa['forecast_gap']}{boundary_flag}")
+
+                # ══════════════════════════════════════════════════════════════
+                # STRATEGY C: Spectrum — evaluate individual buckets per city-date
+                # Runs AFTER the threshold loop (needs all bucket_probs computed)
+                # YES-only. One best bucket per city-date.
+                # ══════════════════════════════════════════════════════════════
+                c_city_ok = (
+                    open_c_city_total.get(city, 0) < cfg_c["max_positions_per_city"] and
+                    open_c_city_exposure.get(city, 0.0) < scan_start_bankroll_c * cfg_c["max_city_exposure_pct"]
+                )
+
+                if c_city_ok and bankroll_c.balance > 0 and bucket_probs:
+                    # Find the peak bucket index (highest forecast probability)
+                    peak_index = max(range(len(bucket_probs)), key=lambda i: bucket_probs[i]["forecast_prob"])
+
+                    # Event-level liquidity check (shared)
+                    any_mkt = market_map.get(first_mkt_key, {})
+                    event_vol_c = any_mkt.get("event_volume", 0.0)
+
+                    if event_vol_c >= cfg_c["min_event_volume"]:
+                        best_c_signal = None
+                        best_c_edge = 0.0
+
+                        for bucket_idx, bp in enumerate(bucket_probs):
+                            bucket_low = bp.get("low", float("-inf"))
+                            bucket_high = bp.get("high")
+
+                            # Skip tail buckets — they don't have clean single-bucket tradability
+                            if bucket_low == float("-inf") or bucket_high is None:
+                                continue
+
+                            forecast_prob = bp["forecast_prob"]
+                            market_price = bp.get("price", 0)
+                            if market_price <= 0 or market_price >= 1:
+                                continue
+
+                            # Bucket-level liquidity
+                            bkt_vol = bp.get("bucket_volume", 0)
+                            if bkt_vol < cfg_c["min_bucket_volume"]:
+                                continue
+
+                            should_c, reason_c, sizing_c = evaluate_signal_spectrum(
+                                city=city,
+                                bucket=bp,
+                                bucket_index=bucket_idx,
+                                peak_index=peak_index,
+                                forecast_prob=forecast_prob,
+                                market_price=market_price,
+                                bankroll=bankroll_c.balance,
+                                open_positions_set=open_c_set,
+                                market_date=market_date_str,
+                                is_celsius=is_celsius,
+                            )
+
+                            if should_c:
+                                bucket_edge = sizing_c.get("bucket_edge", 0)
+                                if bucket_edge > best_c_edge:
+                                    best_c_edge = bucket_edge
+                                    best_c_signal = {
+                                        "city": city, "bucket": bp,
+                                        "sizing": sizing_c, "market_data": any_mkt,
+                                        "forecast": f, "primary_forecast": primary_forecast,
+                                        "gfs_forecast": gfs_forecast, "icon_forecast": icon_forecast,
+                                        "market_date": market_date_str,
+                                        # Spectrum-native analytics — NOT threshold-style.
+                                        # same_side_as_forecast, models_directionally_agree etc.
+                                        # are threshold concepts; set to None for Spectrum.
+                                        # Spectrum's real diagnostics live in sizing (peak_distance)
+                                        # and in open_spectrum_trade (bucket_center, spectrum_gap).
+                                        "forecast_analytics": {
+                                            "forecast_gap": None,  # computed natively in open_spectrum_trade
+                                            "validator_gap": None,
+                                            "same_side_as_forecast": None,
+                                            "models_directionally_agree": None,
+                                            "models_on_bet_side_count": None,
+                                            "model_count": None,
+                                        },
+                                        "strategy": "spectrum",
+                                    }
+
+                        if best_c_signal:
+                            scan_result["signals_found"] += 1
+                            cd_key_c = (city, market_date_str, "spectrum")
+                            best_per_city_date_c[cd_key_c] = best_c_signal
+                            bp_info = best_c_signal["bucket"]
+                            log(f"SIGNAL [spectrum] {city}/{market_date_str} {bp_info.get('label','?')} YES | "
+                                f"FcstProb={bp_info['forecast_prob']:.1%} MktPrice={bp_info.get('price',0):.3f} "
+                                f"Edge={best_c_edge:.1%} PeakDist={best_c_signal['sizing'].get('peak_distance',0)}")
 
             # ── Step 6: Open paper trades — Strategy B ────────────────────────
             for cd_key, sig in best_per_city_date_b.items():
@@ -562,6 +706,41 @@ async def run_scan():
                 scan_result["trades_opened"] += 1
                 log(f"TRADE OPENED [forecast_edge] {city}/{sig['market_date']} >={sig['threshold']}{unit} {sig['direction']} | ${sig['sizing']['size_usd']} | Gap={sig.get('forecast_analytics',{}).get('forecast_gap','?')} | Bankroll->${bankroll_a.balance:.2f}")
 
+            # ── Step 6c: Open paper trades — Strategy C (Spectrum) ────────────
+            for cd_key, sig in best_per_city_date_c.items():
+                city = sig["city"]
+                city_cfg_item = city_by_name[city]
+                is_celsius = city_cfg_item.get("celsius", False)
+
+                current_city_count = open_c_city_total.get(city, 0)
+                if current_city_count >= cfg_c["max_positions_per_city"]:
+                    continue
+                current_city_exposure = open_c_city_exposure.get(city, 0.0)
+                max_city_exp = scan_start_bankroll_c * cfg_c["max_city_exposure_pct"]
+                if current_city_exposure + sig["sizing"]["size_usd"] > max_city_exp:
+                    continue
+
+                sig["forecast"]["gfs_forecast"] = sig.get("gfs_forecast")
+                sig["forecast"]["ecmwf_forecast"] = sig.get("icon_forecast")
+                sig["forecast"]["market_date"] = sig.get("market_date")
+
+                trade = await open_spectrum_trade(
+                    session=session, city=city, station_id=city_cfg_item["station"],
+                    bucket=sig["bucket"], market_data=sig["market_data"],
+                    noaa_data=sig["forecast"], sizing=sig["sizing"],
+                    bankroll_state=bankroll_c,
+                    forecast_analytics=sig.get("forecast_analytics"),
+                )
+
+                open_c_city_total[city] = current_city_count + 1
+                open_c_city_exposure[city] = current_city_exposure + sig["sizing"]["size_usd"]
+                bp = sig["bucket"]
+                open_c_set.add((city, sig["market_date"], bp.get("low"), bp.get("high")))
+                scan_result["trades_opened"] += 1
+                log(f"TRADE OPENED [spectrum] {city}/{sig['market_date']} {bp.get('label','?')} YES | "
+                    f"${sig['sizing']['size_usd']} | Edge={sig['sizing'].get('bucket_edge',0):.1%} | "
+                    f"Bankroll->${bankroll_c.balance:.2f}")
+
             # ── Step 7: Log scan ─────────────────────────────────────────────
             duration_ms = int(time.time() * 1000) - start_ms
             scan_log = ScanLog(
@@ -569,12 +748,12 @@ async def run_scan():
                 signals_found=scan_result["signals_found"],
                 trades_opened=scan_result["trades_opened"],
                 trades_settled=scan_result["trades_settled"],
-                bankroll_snapshot=bankroll_b.balance + bankroll_a.balance,
+                bankroll_snapshot=bankroll_b.balance + bankroll_a.balance + bankroll_c.balance,
                 errors="; ".join(scan_result["errors"]) if scan_result["errors"] else None,
                 duration_ms=duration_ms,
             )
             session.add(scan_log)
 
     scan_result["duration_ms"] = duration_ms
-    log(f"Scan complete in {duration_ms}ms | Sigma=${bankroll_b.balance:.2f} ForecastEdge=${bankroll_a.balance:.2f}")
+    log(f"Scan complete in {duration_ms}ms | Sigma=${bankroll_b.balance:.2f} Edge=${bankroll_a.balance:.2f} Spectrum=${bankroll_c.balance:.2f}")
     return scan_result

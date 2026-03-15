@@ -579,6 +579,7 @@
   }
   .comparison-card.sigma { border-left: 3px solid var(--cyan); }
   .comparison-card.forecast-edge { border-left: 3px solid var(--green); }
+  .comparison-card.spectrum { border-left: 3px solid var(--amber); }
 
   /* Strategy badge on trades */
   .strat-badge {
@@ -591,6 +592,7 @@
   }
   .strat-badge.sigma { background: rgba(0,229,255,0.15); color: var(--cyan); }
   .strat-badge.forecast-edge { background: rgba(0,255,136,0.15); color: var(--green); }
+  .strat-badge.spectrum { background: rgba(255,183,77,0.15); color: var(--amber); }
 </style>
 </head>
 <body>
@@ -627,6 +629,7 @@
     <button class="strategy-tab active" onclick="setStrategy(null, this)">ALL</button>
     <button class="strategy-tab" onclick="setStrategy('sigma', this)">SIGMA</button>
     <button class="strategy-tab" onclick="setStrategy('forecast_edge', this)">FORECAST EDGE</button>
+    <button class="strategy-tab" onclick="setStrategy('spectrum', this)">SPECTRUM</button>
   </div>
 
   <!-- Strategy Comparison Bar (always visible) -->
@@ -651,6 +654,17 @@
         <span id="cc-a-record">0W / 0L</span>
         <span id="cc-a-winrate">0%</span>
         <span id="cc-a-pnl">$0.00</span>
+      </div>
+    </div>
+    <div class="comparison-card spectrum">
+      <div class="cc-header">
+        <span class="cc-label">SPECTRUM (C)</span>
+        <span class="cc-bankroll" id="cc-c-bankroll" style="color:var(--amber)">$2,000</span>
+      </div>
+      <div class="cc-stats">
+        <span id="cc-c-record">0W / 0L</span>
+        <span id="cc-c-winrate">0%</span>
+        <span id="cc-c-pnl">$0.00</span>
       </div>
     </div>
   </div>
@@ -871,6 +885,17 @@
     const apnl = as_.total_pnl || 0;
     document.getElementById('cc-a-pnl').textContent = (apnl >= 0 ? '+' : '') + fmt$(apnl);
     document.getElementById('cc-a-pnl').style.color = apnl >= 0 ? 'var(--green)' : 'var(--red)';
+
+    // Spectrum side
+    const cs = comp.spectrum || {};
+    const cbk = bank.spectrum || {};
+    document.getElementById('cc-c-bankroll').textContent = fmt$(cbk.current || 2000);
+    document.getElementById('cc-c-bankroll').style.color = (cbk.pnl || 0) >= 0 ? 'var(--amber)' : 'var(--red)';
+    document.getElementById('cc-c-record').textContent = `${cs.wins || 0}W / ${cs.losses || 0}L`;
+    document.getElementById('cc-c-winrate').textContent = `${(cs.win_rate || 0).toFixed(0)}%`;
+    const cpnl = cs.total_pnl || 0;
+    document.getElementById('cc-c-pnl').textContent = (cpnl >= 0 ? '+' : '') + fmt$(cpnl);
+    document.getElementById('cc-c-pnl').style.color = cpnl >= 0 ? 'var(--green)' : 'var(--red)';
   }
 
   function updateStatus(ok) {
@@ -899,9 +924,12 @@
     } else if (currentStrategy === 'forecast_edge') {
       current = (b.forecast_edge || {}).current || 0;
       starting = (b.forecast_edge || {}).starting || 2000;
+    } else if (currentStrategy === 'spectrum') {
+      current = (b.spectrum || {}).current || 0;
+      starting = (b.spectrum || {}).starting || 2000;
     } else {
       current = (b.combined || {}).current || 0;
-      starting = (b.combined || {}).starting || 4000;
+      starting = (b.combined || {}).starting || 6000;
     }
 
     document.getElementById('stat-bankroll').textContent = fmt$(current);
@@ -919,7 +947,7 @@
     document.getElementById('open-count').textContent = p.open_positions || 0;
     document.getElementById('history-count').textContent = `${p.total_trades || 0} trades`;
 
-    const dl = (b.daily_loss_sigma || 0) + (b.daily_loss_forecast_edge || 0);
+    const dl = (b.daily_loss_sigma || 0) + (b.daily_loss_forecast_edge || 0) + (b.daily_loss_spectrum || 0);
     document.getElementById('stat-daily-loss').textContent = fmt$(dl);
   }
 
@@ -1016,12 +1044,13 @@
     }
     el.innerHTML = positions.map(t => {
       const stratClass = (t.strategy || 'sigma');
-      const stratLabel = stratClass === 'forecast_edge' ? 'EDGE' : 'SIGMA';
+      const stratLabel = stratClass === 'forecast_edge' ? 'EDGE' : (stratClass === 'spectrum' ? 'SPECTRUM' : 'SIGMA');
+      const tradeLabel = stratClass === 'spectrum' && t.bucket_label ? t.bucket_label : `${t.threshold_f}° ${tempUnit(t.city)}`;
       return `
       <div class="trade-item">
         <span class="trade-side ${t.direction.toLowerCase()}">${t.direction}</span>
         <div class="trade-info">
-          <div class="trade-city">${t.city} — ${t.threshold_f}° ${tempUnit(t.city)}<span class="strat-badge ${stratClass}">${stratLabel}</span></div>
+          <div class="trade-city">${t.city} — ${tradeLabel}<span class="strat-badge ${stratClass}">${stratLabel}</span></div>
           <div class="trade-detail">Entry: ${t.entry_price} · Edge: ${t.edge_pct.toFixed(1)}% · ${t.model_tier || 'NOAA'}: ${t.noaa_forecast_high}°${t.forecast_gap != null ? ' · Gap: ' + t.forecast_gap.toFixed(1) : ''}</div>
           <div class="trade-detail">Bet for: <strong style="color:var(--cyan)">${t.market_date || '—'}</strong> · Opened: ${fmtDate(t.opened_at)}</div>
         </div>
@@ -1042,12 +1071,13 @@
       const pnlClass = pnl === null ? 'open' : pnl >= 0 ? 'pos' : 'neg';
       const pnlTxt = pnl === null ? 'OPEN' : (pnl >= 0 ? '+' : '') + fmt$(pnl);
       const stratClass = (t.strategy || 'sigma');
-      const stratLabel = stratClass === 'forecast_edge' ? 'EDGE' : 'SIGMA';
+      const stratLabel = stratClass === 'forecast_edge' ? 'EDGE' : (stratClass === 'spectrum' ? 'SPECTRUM' : 'SIGMA');
+      const tradeLabel = stratClass === 'spectrum' && t.bucket_label ? t.bucket_label : `${t.threshold_f}° ${tempUnit(t.city)}`;
       return `
         <div class="trade-item">
           <span class="trade-side ${t.direction.toLowerCase()}">${t.direction}</span>
           <div class="trade-info">
-            <div class="trade-city">${t.city} — ${t.threshold_f}° ${tempUnit(t.city)}<span class="strat-badge ${stratClass}">${stratLabel}</span></div>
+            <div class="trade-city">${t.city} — ${tradeLabel}<span class="strat-badge ${stratClass}">${stratLabel}</span></div>
             <div class="trade-detail">${fmtDate(t.opened_at)} · Edge: ${t.edge_pct.toFixed(1)}%${t.forecast_gap != null ? ' · Gap: ' + t.forecast_gap.toFixed(1) : ''}</div>
           </div>
           <span class="trade-stake">${fmt$(t.position_size_usd)}</span>

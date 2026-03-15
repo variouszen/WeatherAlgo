@@ -9,7 +9,7 @@ from sqlalchemy import select, func, desc
 import sys, os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import BOT_CONFIG, STARTING_BANKROLL, DRY_RUN, CITY_MODEL_TIER, STRATEGY_BANKROLL_ID
+from config import BOT_CONFIG, SPECTRUM_CONFIG, STARTING_BANKROLL, DRY_RUN, CITY_MODEL_TIER, STRATEGY_BANKROLL_ID
 from models.database import (
     init_db, AsyncSessionLocal,
     Trade, BankrollState, ScanLog, CityCalibration,
@@ -31,7 +31,7 @@ _last_scan_result = None
 
 @app.on_event("startup")
 async def startup():
-    logger.info("Starting Weather Arb Bot (A/B mode)...")
+    logger.info("Starting Weather Arb Bot (A/B/C mode — Sigma, Edge, Spectrum)...")
     await init_db()
     logger.info(f"DB initialized | DRY_RUN={DRY_RUN} | Starting bankroll=${STARTING_BANKROLL}/strategy")
     await _purge_old_bucket_diagnostics()
@@ -179,7 +179,7 @@ async def purge_stale_trades():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "dry_run": DRY_RUN, "mode": "ab_testing", "timestamp": datetime.now(timezone.utc).isoformat()}
+    return {"status": "ok", "dry_run": DRY_RUN, "mode": "abc_testing", "strategies": ["sigma", "forecast_edge", "spectrum"], "timestamp": datetime.now(timezone.utc).isoformat()}
 
 
 @app.post("/api/scan")
@@ -211,6 +211,7 @@ async def dashboard(strategy: str = None):
     async with AsyncSessionLocal() as session:
         bankroll_b = await get_bankroll(session, "sigma")
         bankroll_a = await get_bankroll(session, "forecast_edge")
+        bankroll_c = await get_bankroll(session, "spectrum")
 
         # Trades query with optional strategy filter
         q = select(Trade).order_by(desc(Trade.opened_at)).limit(200)
@@ -241,8 +242,10 @@ async def dashboard(strategy: str = None):
             start_bal = bankroll_b.starting_balance
         elif strategy == "forecast_edge":
             start_bal = bankroll_a.starting_balance
+        elif strategy == "spectrum":
+            start_bal = bankroll_c.starting_balance
         else:
-            start_bal = bankroll_b.starting_balance + bankroll_a.starting_balance
+            start_bal = bankroll_b.starting_balance + bankroll_a.starting_balance + bankroll_c.starting_balance
 
         running_bal = start_bal
         peak = start_bal
@@ -294,9 +297,11 @@ async def dashboard(strategy: str = None):
             "bankroll": {
                 "sigma": {"current": round(bankroll_b.balance, 2), "starting": bankroll_b.starting_balance, "pnl": round(bankroll_b.balance - bankroll_b.starting_balance, 2)},
                 "forecast_edge": {"current": round(bankroll_a.balance, 2), "starting": bankroll_a.starting_balance, "pnl": round(bankroll_a.balance - bankroll_a.starting_balance, 2)},
-                "combined": {"current": round(bankroll_b.balance + bankroll_a.balance, 2), "starting": bankroll_b.starting_balance + bankroll_a.starting_balance},
+                "spectrum": {"current": round(bankroll_c.balance, 2), "starting": bankroll_c.starting_balance, "pnl": round(bankroll_c.balance - bankroll_c.starting_balance, 2)},
+                "combined": {"current": round(bankroll_b.balance + bankroll_a.balance + bankroll_c.balance, 2), "starting": bankroll_b.starting_balance + bankroll_a.starting_balance + bankroll_c.starting_balance},
                 "daily_loss_sigma": round(bankroll_b.daily_loss_today, 2),
                 "daily_loss_forecast_edge": round(bankroll_a.daily_loss_today, 2),
+                "daily_loss_spectrum": round(bankroll_c.daily_loss_today, 2),
             },
             "performance": {
                 "total_trades": len(settled), "open_positions": len(open_trades),
@@ -324,7 +329,7 @@ async def dashboard(strategy: str = None):
 async def _build_strategy_comparison(session):
     """Build side-by-side strategy comparison data."""
     result = {}
-    for strat in ["sigma", "forecast_edge"]:
+    for strat in ["sigma", "forecast_edge", "spectrum"]:
         q = select(Trade).where(Trade.status.in_(["WIN", "LOSS"]), Trade.strategy == strat)
         trades_result = await session.execute(q)
         trades = trades_result.scalars().all()
@@ -461,6 +466,13 @@ def _trade_to_dict(t: Trade) -> dict:
         "models_directionally_agree": t.models_directionally_agree,
         "models_on_bet_side_count": t.models_on_bet_side_count,
         "model_count": t.model_count,
+        # Strategy C (Spectrum) bucket fields
+        "bucket_low": t.bucket_low,
+        "bucket_high": t.bucket_high,
+        "bucket_label": t.bucket_label,
+        "bucket_forecast_prob": t.bucket_forecast_prob,
+        "bucket_market_price": t.bucket_market_price,
+        "bucket_center": t.bucket_center,
     }
 
 

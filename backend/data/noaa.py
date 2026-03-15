@@ -172,6 +172,116 @@ def prob_range(low: float, high: float, forecast: float, sigma: float) -> float:
     return float(np.clip(dist.cdf(high) - dist.cdf(low), 0.01, 0.99))
 
 
+# ── Level 1: Bucket-native probability engine ────────────────────────────────
+# Maps forecast distribution onto Polymarket's actual bucket structure with
+# settlement-aware rounding correction (±0.5 degree boundaries).
+# Polymarket resolves on whole-degree values from Wunderground.
+# Any true temp >= X.5 rounds to X+1 on Wunderground display.
+# Therefore bucket "82-83°F" wins when true temp is in [81.5, 83.5).
+
+SETTLEMENT_ROUNDING = 0.5  # whole-degree rounding for both F and C
+
+
+def compute_bucket_probabilities(buckets: list, forecast: float, sigma: float) -> list:
+    """
+    Map forecast Normal(forecast, sigma) onto native Polymarket buckets
+    using settlement-corrected boundaries.
+
+    Each bucket gets P(Wunderground displays a value in this bucket's range).
+
+    Bucket types:
+      Interior "82-83°F": P(true in [81.5, 83.5))
+      Interior "13°C":    P(true in [12.5, 13.5))
+      Lower tail "31°F or below": P(true < 31.5)
+      Upper tail "46°F or higher": P(true >= 45.5)
+
+    Args:
+        buckets: list of dicts with 'low', 'high', 'price', 'label' etc
+                 (from Polymarket market_data["buckets"])
+        forecast: primary forecast value in native units (°F or °C)
+        sigma: forecast uncertainty in same units
+
+    Returns: list of dicts, each original bucket + 'forecast_prob' field
+    """
+    if not buckets or sigma <= 0:
+        return []
+
+    dist = stats.norm(loc=forecast, scale=sigma)
+    result = []
+
+    for b in buckets:
+        low = b.get("low", float("-inf"))
+        high = b.get("high")
+
+        # Compute settlement-corrected boundaries
+        if low == float("-inf"):
+            # Lower tail: "31°F or below" → true < 31.5
+            settle_low = float("-inf")
+            settle_high = high + SETTLEMENT_ROUNDING if high is not None else float("inf")
+        elif high is None:
+            # Upper tail: "46°F or higher" → true >= 45.5
+            settle_low = low - SETTLEMENT_ROUNDING
+            settle_high = float("inf")
+        else:
+            # Interior bucket: "82-83°F" → true in [81.5, 83.5)
+            settle_low = low - SETTLEMENT_ROUNDING
+            settle_high = high + SETTLEMENT_ROUNDING
+
+        # Compute probability — NO CLIPPING here.
+        # Raw CDF values flow through to preserve total probability mass.
+        # Clipping happens only at final consumption points:
+        #   - cumulative_from_buckets() clips its return to [0.01, 0.99]
+        #   - Spectrum evaluator works with raw forecast_prob values
+        if settle_low == float("-inf"):
+            p = dist.cdf(settle_high)
+        elif settle_high == float("inf"):
+            p = 1.0 - dist.cdf(settle_low)
+        else:
+            p = dist.cdf(settle_high) - dist.cdf(settle_low)
+
+        p = max(0.0, float(p))  # floor at 0, no ceiling — preserves mass
+
+        result.append({
+            **b,
+            "forecast_prob": round(p, 6),
+            "settle_low": settle_low,
+            "settle_high": settle_high,
+        })
+
+    return result
+
+
+def cumulative_from_buckets(bucket_probs: list, threshold: float) -> float:
+    """
+    Derive P(>= threshold) by summing forecast probabilities of all buckets
+    at or above the threshold.
+
+    This replaces prob_above() for trade decisions. The rounding correction
+    is already embedded in each bucket's forecast_prob from
+    compute_bucket_probabilities().
+
+    Args:
+        bucket_probs: output of compute_bucket_probabilities()
+        threshold: the cumulative threshold (e.g. 82 for P(>=82))
+
+    Returns: float probability in [0.01, 0.99]
+    """
+    if not bucket_probs:
+        return 0.50  # no data → neutral
+
+    cum = 0.0
+    for b in bucket_probs:
+        low = b.get("low", float("-inf"))
+        high = b.get("high")
+        # Bucket counts toward cumulative if its lower bound >= threshold
+        # Upper tail (high=None) counts if low >= threshold
+        # Lower tail (low=-inf) never counts
+        if low != float("-inf") and low >= threshold:
+            cum += b["forecast_prob"]
+
+    return float(np.clip(cum, 0.01, 0.99))
+
+
 def compute_confidence(sigma: float, is_celsius: bool = False) -> float:
     """
     Map sigma -> 0-1 confidence. Lower uncertainty = higher confidence.

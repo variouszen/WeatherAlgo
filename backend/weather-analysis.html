@@ -159,7 +159,7 @@ const API = window.location.origin;
 
 let allTrades = [];
 let excludeFlagged = false;
-let currentStrategy = null;  // null = all, "sigma", "forecast_edge"
+let currentStrategy = null;  // null = all, "sigma", "forecast_edge", "spectrum"
 
 async function fetchTrades() {
   const stratParam = currentStrategy ? `&strategy=${currentStrategy}` : '';
@@ -227,6 +227,7 @@ function render(trades) {
         <button class="toggle-btn ${currentStrategy === null ? 'active' : ''}" onclick="setStrategy(null)">All</button>
         <button class="toggle-btn ${currentStrategy === 'sigma' ? 'active' : ''}" onclick="setStrategy('sigma')">Sigma</button>
         <button class="toggle-btn ${currentStrategy === 'forecast_edge' ? 'active' : ''}" onclick="setStrategy('forecast_edge')">Edge</button>
+        <button class="toggle-btn ${currentStrategy === 'spectrum' ? 'active' : ''}" onclick="setStrategy('spectrum')">Spectrum</button>
         <button class="toggle-btn ${excludeFlagged ? 'active' : ''}" onclick="toggleFlag()">
           ${excludeFlagged ? '✓ ' : ''}Exclude flagged
         </button>
@@ -791,9 +792,10 @@ function buildForecastActual(closed) {
     const jmaVal  = tier === 'JMA' ? t.noaa_forecast_high : null;
 
     const strat = t.strategy || 'sigma';
-    const stratColor = strat === 'forecast_edge' ? 'var(--green)' : 'var(--cyan)';
-    const stratLabel = strat === 'forecast_edge' ? 'EDGE' : 'SIG';
+    const stratColor = strat === 'forecast_edge' ? 'var(--green)' : (strat === 'spectrum' ? 'var(--amber, #ffb74d)' : 'var(--cyan)');
+    const stratLabel = strat === 'forecast_edge' ? 'EDGE' : (strat === 'spectrum' ? 'SPEC' : 'SIG');
     const gapStr = t.forecast_gap != null ? (t.forecast_gap >= 0 ? '+' : '') + t.forecast_gap.toFixed(1) : '—';
+    const bucketStr = strat === 'spectrum' && t.bucket_label ? t.bucket_label : '';
 
     return `<tr>
       <td>${flagHtml}</td>

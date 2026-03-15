@@ -8,7 +8,7 @@ from sqlalchemy import select, update
 import sys, os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import BOT_CONFIG, FORECAST_EDGE_CONFIG, STARTING_BANKROLL, STRATEGY_BANKROLL_ID
+from config import BOT_CONFIG, FORECAST_EDGE_CONFIG, SPECTRUM_CONFIG, STARTING_BANKROLL, STRATEGY_BANKROLL_ID
 from models.database import Trade, BankrollState, ScanLog, CityCalibration
 
 logger = logging.getLogger(__name__)
@@ -266,6 +266,94 @@ def evaluate_signal_forecast_edge(
     return True, "ALL_FILTERS_PASSED", sizing
 
 
+# ── Strategy C: Spectrum (native bucket EV) ───────────────────────────────────
+
+def evaluate_signal_spectrum(
+    city, bucket, bucket_index, peak_index, forecast_prob, market_price,
+    bankroll, open_positions_set, market_date=None, is_celsius=False,
+):
+    """
+    Strategy C (Spectrum) — evaluate a single native Polymarket bucket.
+    YES-only at launch. One best bucket per city-date.
+
+    Both sides of the comparison are native:
+      - forecast_prob: from compute_bucket_probabilities()
+      - market_price: real Polymarket bucket YES price
+
+    Hard gates (evaluated in order):
+      1. Peak proximity — bucket must be within N positions of forecast peak
+      2. Minimum forecast probability — no longshot chasing
+      3. Minimum edge — forecast_prob - market_price >= min
+      4. Price bounds — don't overpay
+      5. Liquidity — bucket volume minimum
+      6. City-date-bucket dedup
+      7. Bankroll floor
+    """
+    cfg = SPECTRUM_CONFIG
+
+    # ── HARD GATE 1: Peak proximity ──────────────────────────────────────────
+    distance_from_peak = abs(bucket_index - peak_index)
+    if distance_from_peak > cfg["max_buckets_from_peak"]:
+        return False, f"Peak proximity: bucket {bucket_index} is {distance_from_peak} from peak {peak_index} (max {cfg['max_buckets_from_peak']})", {}
+
+    # ── HARD GATE 2: Minimum forecast probability ────────────────────────────
+    if forecast_prob < cfg["min_forecast_prob"]:
+        return False, f"Forecast prob {forecast_prob:.1%} < min {cfg['min_forecast_prob']:.1%}", {}
+
+    # ── HARD GATE 3: Minimum edge (YES only) ─────────────────────────────────
+    edge = forecast_prob - market_price
+    if edge < cfg["min_bucket_edge"]:
+        return False, f"Bucket edge {edge:.1%} < min {cfg['min_bucket_edge']:.1%}", {}
+
+    # ── HARD GATE 4: Price bounds ────────────────────────────────────────────
+    if market_price > cfg["max_yes_price"]:
+        return False, f"YES price {market_price:.2f} > max {cfg['max_yes_price']:.2f}", {}
+
+    # ── HARD GATE 5: City-date-bucket dedup ──────────────────────────────────
+    bucket_low = bucket.get("low", 0)
+    bucket_high = bucket.get("high")
+    dedup_key = (city, market_date, bucket_low, bucket_high)
+    if dedup_key in open_positions_set:
+        return False, f"Already have spectrum position on {city}/{market_date}/{bucket.get('label','?')}", {}
+
+    # ── HARD GATE 6: Bankroll floor ──────────────────────────────────────────
+    if bankroll < cfg["bankroll_floor"]:
+        return False, f"Bankroll ${bankroll:.2f} below floor", {}
+
+    # ── Sizing: Kelly on individual bucket odds ──────────────────────────────
+    # Entry price = market_price (buying YES at this price)
+    entry_price = market_price
+    kelly_raw = (edge * 1.0) / max(0.001, 1.0 - entry_price)
+    kelly_q = kelly_raw * cfg["kelly_fraction"]
+    kelly_capped = min(kelly_q, cfg["max_position_pct"])
+
+    size_raw = bankroll * kelly_capped
+    size = max(cfg["min_position_usd"], round(size_raw, 2))
+    size = min(size, bankroll * cfg["max_position_pct"])
+
+    if size > bankroll:
+        return False, "Insufficient bankroll", {}
+
+    sizing = {
+        "kelly_raw": round(kelly_raw, 4),
+        "kelly_capped": round(kelly_capped, 4),
+        "size_usd": round(size, 2),
+        "shares": round(size / max(0.001, entry_price), 4),
+        "correlation_factor": 1.0,
+        "models_agreed": None,
+        "consensus_factor": 1.0,
+        "spread_note": "",
+        "early_window": False,
+        "entry_number": 1,
+        "strategy": "spectrum",
+        "bucket_edge": round(edge, 4),
+        "forecast_prob": round(forecast_prob, 4),
+        "peak_distance": distance_from_peak,
+    }
+
+    return True, "ALL_FILTERS_PASSED", sizing
+
+
 # ── Database operations ──────────────────────────────────────────────────────
 
 async def get_bankroll(session, strategy="sigma"):
@@ -351,11 +439,116 @@ async def open_paper_trade(
     return trade
 
 
-async def settle_trade(session, trade, bankroll_state, actual_high_f=None, polymarket_won=None):
-    """Settle a trade. Unchanged from original except uses strategy-scoped bankroll."""
+async def open_spectrum_trade(
+    session, city, station_id, bucket, market_data, noaa_data, sizing,
+    bankroll_state, forecast_analytics=None,
+):
+    """Open a Strategy C (Spectrum) paper trade on a specific native bucket."""
+    size = sizing["size_usd"]
+    entry_price = bucket["price"]  # YES price on this specific bucket
+    forecast_prob = sizing.get("forecast_prob", 0)
+    edge = sizing.get("bucket_edge", 0)
+    unit = noaa_data.get("unit", "F")
+    fa = forecast_analytics or {}
+
+    bucket_low = bucket.get("low", 0)
+    bucket_high = bucket.get("high")
+    bucket_label = bucket.get("label", "")
+
+    # Compute bucket center — the midpoint of the bucket range
+    if bucket_low == float("-inf") and bucket_high is not None:
+        b_center = bucket_high - 1.0  # lower tail: estimate as high - 1
+    elif bucket_high is None and bucket_low != float("-inf"):
+        b_center = bucket_low + 1.0   # upper tail: estimate as low + 1
+    elif bucket_low != float("-inf") and bucket_high is not None:
+        b_center = (bucket_low + bucket_high) / 2.0
+    else:
+        b_center = None
+
+    market_condition = f"Bucket: {bucket_label}"
+
+    # Spectrum-native forecast_gap: distance from forecast to bucket center
+    # (more meaningful than threshold-style gap for bucket trades)
+    primary_forecast = noaa_data.get("forecast_high", 0)
+    spectrum_gap = round(primary_forecast - b_center, 2) if b_center is not None else None
+
+    trade = Trade(
+        city=city, station_id=station_id,
+        threshold_f=bucket_low if bucket_low != float("-inf") else 0,
+        direction="YES",  # Spectrum is YES-only at launch
+        market_condition=market_condition,
+        polymarket_market_id=market_data.get("market_id"),
+        polymarket_token_id=bucket.get("token_id"),
+        market_yes_price=entry_price,
+        market_volume=market_data.get("volume", 0),
+        noaa_forecast_high=primary_forecast,
+        noaa_sigma=noaa_data.get("sigma", 0),
+        noaa_true_prob=forecast_prob,
+        noaa_condition=noaa_data.get("condition"),
+        forecast_day_offset=noaa_data.get("day_offset", 0),
+        edge_pct=round(edge, 4),
+        confidence=noaa_data.get("confidence", 0),
+        kelly_raw=sizing["kelly_raw"], kelly_capped=sizing["kelly_capped"],
+        position_size_usd=size, entry_price=round(entry_price, 4),
+        shares=sizing["shares"], bankroll_at_entry=bankroll_state.balance,
+        status="OPEN",
+        gfs_forecast=noaa_data.get("gfs_forecast"),
+        ecmwf_forecast=noaa_data.get("ecmwf_forecast"),
+        models_agreed=None,
+        early_window=False,
+        entry_number=1,
+        market_date=noaa_data.get("market_date"),
+        # Spectrum uses forecast_gap as distance-to-bucket-center (native metric)
+        strategy="spectrum",
+        forecast_gap=spectrum_gap,
+        same_side_as_forecast=fa.get("same_side_as_forecast"),
+        models_directionally_agree=fa.get("models_directionally_agree"),
+        models_on_bet_side_count=fa.get("models_on_bet_side_count"),
+        model_count=fa.get("model_count"),
+        # Bucket-specific fields (native to Spectrum)
+        bucket_low=bucket_low if bucket_low != float("-inf") else None,
+        bucket_high=bucket_high,
+        bucket_label=bucket_label,
+        bucket_forecast_prob=round(forecast_prob, 4),
+        bucket_market_price=round(entry_price, 4),
+        bucket_center=round(b_center, 2) if b_center is not None else None,
+    )
+    session.add(trade)
+
+    bankroll_state.balance = round(bankroll_state.balance - size, 2)
+    await session.flush()
+
+    peak_dist = sizing.get("peak_distance", "?")
+    logger.info(
+        f"[TRADE] OPEN [spectrum] {city} {bucket_label} YES | "
+        f"FcstProb={forecast_prob:.1%} MktPrice={entry_price:.3f} Edge={edge:.1%} | "
+        f"BucketCenter={b_center} PeakDist={peak_dist} | "
+        f"Size=${size} | Bankroll->${bankroll_state.balance:.2f}"
+    )
+    return trade
+
+
+async def settle_trade(session, trade, bankroll_state, actual_high_f=None, polymarket_won=None, winning_bucket=None):
+    """
+    Settle a trade. Strategy-scoped bankroll.
+
+    For Spectrum trades (strategy='spectrum'), settlement checks if our
+    specific bucket won, not cumulative threshold logic. winning_bucket
+    should be a dict with 'winning_bucket_low' and 'winning_bucket_high'.
+    """
     cfg = BOT_CONFIG
 
-    if polymarket_won is not None:
+    if trade.strategy == "spectrum" and winning_bucket is not None:
+        # Spectrum settlement: did our exact bucket win?
+        wb_low = winning_bucket.get("winning_bucket_low")
+        wb_high = winning_bucket.get("winning_bucket_high")
+        our_low = trade.bucket_low
+        our_high = trade.bucket_high
+        # Match: our bucket bounds == winning bucket bounds
+        bucket_match = (our_low == wb_low) and (our_high == wb_high)
+        # Spectrum is YES-only: if bucket matched, we win
+        won = bucket_match
+    elif polymarket_won is not None:
         won = polymarket_won
     elif actual_high_f is not None:
         won = (

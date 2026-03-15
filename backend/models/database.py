@@ -19,7 +19,7 @@ class Base(DeclarativeBase):
 
 
 class BankrollState(Base):
-    """Per-strategy bankroll tracking. id=1 for sigma, id=2 for forecast_edge."""
+    """Per-strategy bankroll tracking. id=1 for sigma, id=2 for forecast_edge, id=3 for spectrum."""
     __tablename__ = "bankroll_state"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
@@ -101,6 +101,14 @@ class Trade(Base):
     models_directionally_agree: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     models_on_bet_side_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     model_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    # ── Strategy C (Spectrum) bucket-specific fields ──────────────────────────
+    bucket_low: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    bucket_high: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    bucket_label: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    bucket_forecast_prob: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    bucket_market_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    bucket_center: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
     # Timestamps
     opened_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
@@ -191,6 +199,18 @@ async def init_db():
                 starting_balance=STARTING_BANKROLL,
                 daily_loss_today=0.0,
                 strategy="forecast_edge",
+            ))
+
+        # Strategy C (spectrum) — id=3
+        result3 = await session.execute(select(BankrollState).where(BankrollState.id == 3))
+        row3 = result3.scalar_one_or_none()
+        if not row3:
+            session.add(BankrollState(
+                id=3,
+                balance=STARTING_BANKROLL,
+                starting_balance=STARTING_BANKROLL,
+                daily_loss_today=0.0,
+                strategy="spectrum",
             ))
 
         await session.commit()

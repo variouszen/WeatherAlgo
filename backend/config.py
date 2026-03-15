@@ -127,6 +127,47 @@ FORECAST_EDGE_CONFIG = {
 STRATEGY_BANKROLL_ID = {
     "sigma": 1,
     "forecast_edge": 2,
+    "spectrum": 3,
+}
+
+
+# ── Strategy C: Spectrum (native bucket EV) ───────────────────────────────────
+# Trades individual Polymarket buckets directly. Both sides of the comparison
+# are native: forecast bucket probability vs real bucket market price.
+# YES-only at launch. One best bucket per city-date.
+SPECTRUM_CONFIG = {
+    # --- Bucket edge gate ---
+    "min_bucket_edge": 0.08,         # 8% minimum edge per bucket
+
+    # --- Price bounds (individual bucket) ---
+    "max_yes_price": 0.50,           # don't buy YES above 50¢
+
+    # --- Peak proximity (HARD GATE) ---
+    "max_buckets_from_peak": 3,      # only trade within 3 positions of forecast peak
+
+    # --- Minimum forecast probability (HARD GATE) ---
+    "min_forecast_prob": 0.05,       # bucket must have ≥5% model probability
+
+    # --- Liquidity ---
+    "min_event_volume": 5000,
+    "min_bucket_volume": 500,
+
+    # --- Position sizing ---
+    "kelly_fraction": 0.25,
+    "max_position_pct": 0.02,
+    "min_position_usd": 10.0,
+
+    # --- City caps ---
+    "max_positions_per_city": 3,
+    "max_city_exposure_pct": 0.06,
+
+    # --- Circuit breakers (disabled for paper) ---
+    "daily_loss_cap_pct": 1.00,
+    "daily_loss_cap_floor_usd": 50.0,
+    "bankroll_floor": 0.0,
+
+    # --- Fees ---
+    "polymarket_fee_pct": 0.02,
 }
 
 
