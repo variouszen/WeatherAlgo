@@ -4,7 +4,7 @@
     "builder": "NIXPACKS"
   },
   "deploy": {
-    "startCommand": "python run.py",
+    "startCommand": "python migrate_ab_testing.py",
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 5
   }

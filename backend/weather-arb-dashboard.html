@@ -509,6 +509,88 @@
     opacity: 0.4;
     cursor: not-allowed;
   }
+
+  /* Strategy filter tabs */
+  .strategy-tabs {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+  .strategy-tab {
+    padding: 6px 16px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--muted);
+    font-family: 'Space Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 1px;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .strategy-tab.active {
+    background: rgba(0,229,255,0.1);
+    border-color: var(--cyan);
+    color: var(--cyan);
+  }
+  .strategy-tab:hover:not(.active) {
+    border-color: var(--muted);
+    color: var(--text);
+  }
+
+  /* Strategy comparison bar */
+  .comparison-bar {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+  .comparison-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 16px;
+  }
+  .comparison-card .cc-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+  }
+  .comparison-card .cc-label {
+    font-family: 'Space Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 1px;
+    color: var(--muted);
+  }
+  .comparison-card .cc-bankroll {
+    font-family: 'Space Mono', monospace;
+    font-size: 13px;
+    font-weight: 700;
+  }
+  .comparison-card .cc-stats {
+    display: flex;
+    gap: 16px;
+    font-size: 12px;
+    color: var(--text);
+  }
+  .comparison-card .cc-stats span {
+    opacity: 0.7;
+  }
+  .comparison-card.sigma { border-left: 3px solid var(--cyan); }
+  .comparison-card.forecast-edge { border-left: 3px solid var(--green); }
+
+  /* Strategy badge on trades */
+  .strat-badge {
+    font-family: 'Space Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 1px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    margin-left: 8px;
+  }
+  .strat-badge.sigma { background: rgba(0,229,255,0.15); color: var(--cyan); }
+  .strat-badge.forecast-edge { background: rgba(0,255,136,0.15); color: var(--green); }
 </style>
 </head>
 <body>
@@ -516,7 +598,7 @@
 <header class="header">
   <div class="logo">
     WEATHER ARB
-    <span>PAPER TRADING SYSTEM</span>
+    <span>A/B PAPER TRADING</span>
   </div>
   <div class="status-bar">
     <div class="status-pill online" id="status-pill">
@@ -540,6 +622,39 @@
     <button onclick="saveUrl()">CONNECT</button>
   </div>
 
+  <!-- Strategy Filter -->
+  <div class="strategy-tabs">
+    <button class="strategy-tab active" onclick="setStrategy(null, this)">ALL</button>
+    <button class="strategy-tab" onclick="setStrategy('sigma', this)">SIGMA</button>
+    <button class="strategy-tab" onclick="setStrategy('forecast_edge', this)">FORECAST EDGE</button>
+  </div>
+
+  <!-- Strategy Comparison Bar (always visible) -->
+  <div class="comparison-bar" id="comparison-bar">
+    <div class="comparison-card sigma">
+      <div class="cc-header">
+        <span class="cc-label">SIGMA (B)</span>
+        <span class="cc-bankroll" id="cc-b-bankroll" style="color:var(--cyan)">$2,000</span>
+      </div>
+      <div class="cc-stats">
+        <span id="cc-b-record">0W / 0L</span>
+        <span id="cc-b-winrate">0%</span>
+        <span id="cc-b-pnl">$0.00</span>
+      </div>
+    </div>
+    <div class="comparison-card forecast-edge">
+      <div class="cc-header">
+        <span class="cc-label">FORECAST EDGE (A)</span>
+        <span class="cc-bankroll" id="cc-a-bankroll" style="color:var(--green)">$2,000</span>
+      </div>
+      <div class="cc-stats">
+        <span id="cc-a-record">0W / 0L</span>
+        <span id="cc-a-winrate">0%</span>
+        <span id="cc-a-pnl">$0.00</span>
+      </div>
+    </div>
+  </div>
+
   <!-- Stats Row -->
   <div class="stats-grid">
     <div class="stat-card">
@@ -560,7 +675,7 @@
     <div class="stat-card red">
       <div class="stat-label">Daily Loss</div>
       <div class="stat-value" id="stat-daily-loss">—</div>
-      <div class="stat-sub">5% cap = $100</div>
+      <div class="stat-sub">A/B paper — no cap</div>
     </div>
   </div>
 
@@ -664,6 +779,7 @@
   let countdown = 30;
   let countdownTimer;
   let dashboardData = null;
+  let currentStrategy = null;  // null = all, "sigma", "forecast_edge"
 
   document.getElementById('api-url').value = API_URL;
 
@@ -694,7 +810,7 @@
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   }
 
-  const CELSIUS_CITIES = new Set(["London", "Paris", "Munich", "Seoul", "Tokyo", "Shanghai"]);
+  const CELSIUS_CITIES = new Set(["London", "Paris", "Munich", "Tokyo"]);
   function tempUnit(city) { return CELSIUS_CITIES.has(city) ? 'C' : 'F'; }
 
   function fmtDate(iso) {
@@ -706,9 +822,11 @@
   async function loadAll() {
     resetCountdown();
     try {
-      const data = await fetchAPI('/api/dashboard');
+      const stratParam = currentStrategy ? `?strategy=${currentStrategy}` : '';
+      const data = await fetchAPI('/api/dashboard' + stratParam);
       dashboardData = data;
       updateStatus(true);
+      renderComparisonBar(data);
       renderStats(data);
       renderEquity(data.equity_curve || []);
       renderPerformance(data.performance || {});
@@ -719,6 +837,40 @@
       updateStatus(false);
       console.error(e);
     }
+  }
+
+  function setStrategy(strat, btn) {
+    currentStrategy = strat;
+    document.querySelectorAll('.strategy-tab').forEach(t => t.classList.remove('active'));
+    btn.classList.add('active');
+    loadAll();
+  }
+
+  function renderComparisonBar(data) {
+    const comp = data.strategy_comparison || {};
+    const bank = data.bankroll || {};
+
+    // Sigma side
+    const bs = comp.sigma || {};
+    const bbk = bank.sigma || {};
+    document.getElementById('cc-b-bankroll').textContent = fmt$(bbk.current || 2000);
+    document.getElementById('cc-b-bankroll').style.color = (bbk.pnl || 0) >= 0 ? 'var(--cyan)' : 'var(--red)';
+    document.getElementById('cc-b-record').textContent = `${bs.wins || 0}W / ${bs.losses || 0}L`;
+    document.getElementById('cc-b-winrate').textContent = `${(bs.win_rate || 0).toFixed(0)}%`;
+    const bpnl = bs.total_pnl || 0;
+    document.getElementById('cc-b-pnl').textContent = (bpnl >= 0 ? '+' : '') + fmt$(bpnl);
+    document.getElementById('cc-b-pnl').style.color = bpnl >= 0 ? 'var(--green)' : 'var(--red)';
+
+    // Forecast Edge side
+    const as_ = comp.forecast_edge || {};
+    const abk = bank.forecast_edge || {};
+    document.getElementById('cc-a-bankroll').textContent = fmt$(abk.current || 2000);
+    document.getElementById('cc-a-bankroll').style.color = (abk.pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)';
+    document.getElementById('cc-a-record').textContent = `${as_.wins || 0}W / ${as_.losses || 0}L`;
+    document.getElementById('cc-a-winrate').textContent = `${(as_.win_rate || 0).toFixed(0)}%`;
+    const apnl = as_.total_pnl || 0;
+    document.getElementById('cc-a-pnl').textContent = (apnl >= 0 ? '+' : '') + fmt$(apnl);
+    document.getElementById('cc-a-pnl').style.color = apnl >= 0 ? 'var(--green)' : 'var(--red)';
   }
 
   function updateStatus(ok) {
@@ -738,15 +890,28 @@
   function renderStats(data) {
     const b = data.bankroll || {};
     const p = data.performance || {};
-    
-    document.getElementById('stat-bankroll').textContent = fmt$(b.current);
-    const pnl = (b.current - b.starting);
-    const pnlPct = b.starting ? (pnl / b.starting * 100).toFixed(2) : '0.00';
+
+    // Bankroll display depends on filter
+    let current, starting;
+    if (currentStrategy === 'sigma') {
+      current = (b.sigma || {}).current || 0;
+      starting = (b.sigma || {}).starting || 2000;
+    } else if (currentStrategy === 'forecast_edge') {
+      current = (b.forecast_edge || {}).current || 0;
+      starting = (b.forecast_edge || {}).starting || 2000;
+    } else {
+      current = (b.combined || {}).current || 0;
+      starting = (b.combined || {}).starting || 4000;
+    }
+
+    document.getElementById('stat-bankroll').textContent = fmt$(current);
+    const pnl = current - starting;
+    const pnlPct = starting ? (pnl / starting * 100).toFixed(2) : '0.00';
     const sign = pnl >= 0 ? '+' : '';
     document.getElementById('stat-pnl').textContent = `${sign}${fmt$(pnl)} (${sign}${pnlPct}%)`;
     document.getElementById('stat-pnl').style.color = pnl >= 0 ? 'var(--green)' : 'var(--red)';
 
-    const wr = p.win_rate ? (p.win_rate * 100).toFixed(0) + '%' : '0%';
+    const wr = p.win_rate ? p.win_rate.toFixed(0) + '%' : '0%';
     document.getElementById('stat-winrate').textContent = wr;
     document.getElementById('stat-trades').textContent = `${p.total_trades || 0} trades`;
 
@@ -754,7 +919,7 @@
     document.getElementById('open-count').textContent = p.open_positions || 0;
     document.getElementById('history-count').textContent = `${p.total_trades || 0} trades`;
 
-    const dl = b.daily_loss_today || 0;
+    const dl = (b.daily_loss_sigma || 0) + (b.daily_loss_forecast_edge || 0);
     document.getElementById('stat-daily-loss').textContent = fmt$(dl);
   }
 
@@ -763,7 +928,7 @@
     document.getElementById('p-pf').textContent = p.profit_factor != null ? p.profit_factor.toFixed(2) : '—';
     document.getElementById('p-avgwin').textContent = p.avg_win != null ? fmt$(p.avg_win) : '—';
     document.getElementById('p-avgloss').textContent = p.avg_loss != null ? fmt$(p.avg_loss) : '—';
-    document.getElementById('p-dd').textContent = p.max_drawdown_pct != null ? (p.max_drawdown_pct * 100).toFixed(1) + '%' : '—';
+    document.getElementById('p-dd').textContent = p.max_drawdown_pct != null ? p.max_drawdown_pct.toFixed(1) + '%' : '—';
     document.getElementById('p-ev').textContent = p.ev_per_trade != null ? fmt$(p.ev_per_trade) : '—';
   }
 
@@ -849,18 +1014,21 @@
       el.innerHTML = '<div class="empty-state"><div class="icon">📊</div>NO OPEN POSITIONS</div>';
       return;
     }
-    el.innerHTML = positions.map(t => `
+    el.innerHTML = positions.map(t => {
+      const stratClass = (t.strategy || 'sigma');
+      const stratLabel = stratClass === 'forecast_edge' ? 'EDGE' : 'SIGMA';
+      return `
       <div class="trade-item">
         <span class="trade-side ${t.direction.toLowerCase()}">${t.direction}</span>
         <div class="trade-info">
-          <div class="trade-city">${t.city} — ${t.threshold_f}° ${tempUnit(t.city)}</div>
-          <div class="trade-detail">Entry: ${t.entry_price} · Edge: ${t.edge_pct.toFixed(1)}% · ${t.model_tier || 'NOAA'}: ${t.noaa_forecast_high}°</div>
+          <div class="trade-city">${t.city} — ${t.threshold_f}° ${tempUnit(t.city)}<span class="strat-badge ${stratClass}">${stratLabel}</span></div>
+          <div class="trade-detail">Entry: ${t.entry_price} · Edge: ${t.edge_pct.toFixed(1)}% · ${t.model_tier || 'NOAA'}: ${t.noaa_forecast_high}°${t.forecast_gap != null ? ' · Gap: ' + t.forecast_gap.toFixed(1) : ''}</div>
           <div class="trade-detail">Bet for: <strong style="color:var(--cyan)">${t.market_date || '—'}</strong> · Opened: ${fmtDate(t.opened_at)}</div>
         </div>
         <span class="trade-stake">${fmt$(t.position_size_usd)}</span>
         <span class="trade-pnl open">OPEN</span>
       </div>
-    `).join('');
+    `}).join('');
   }
 
   function renderTradeHistory(trades) {
@@ -873,12 +1041,14 @@
       const pnl = t.net_pnl;
       const pnlClass = pnl === null ? 'open' : pnl >= 0 ? 'pos' : 'neg';
       const pnlTxt = pnl === null ? 'OPEN' : (pnl >= 0 ? '+' : '') + fmt$(pnl);
+      const stratClass = (t.strategy || 'sigma');
+      const stratLabel = stratClass === 'forecast_edge' ? 'EDGE' : 'SIGMA';
       return `
         <div class="trade-item">
           <span class="trade-side ${t.direction.toLowerCase()}">${t.direction}</span>
           <div class="trade-info">
-            <div class="trade-city">${t.city} — ${t.threshold_f}° ${tempUnit(t.city)}</div>
-            <div class="trade-detail">${fmtDate(t.opened_at)} · Edge: ${t.edge_pct.toFixed(1)}%</div>
+            <div class="trade-city">${t.city} — ${t.threshold_f}° ${tempUnit(t.city)}<span class="strat-badge ${stratClass}">${stratLabel}</span></div>
+            <div class="trade-detail">${fmtDate(t.opened_at)} · Edge: ${t.edge_pct.toFixed(1)}%${t.forecast_gap != null ? ' · Gap: ' + t.forecast_gap.toFixed(1) : ''}</div>
           </div>
           <span class="trade-stake">${fmt$(t.position_size_usd)}</span>
           <span class="trade-pnl ${pnlClass}">${pnlTxt}</span>

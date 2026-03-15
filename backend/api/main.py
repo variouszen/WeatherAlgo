@@ -9,7 +9,7 @@ from sqlalchemy import select, func, desc
 import sys, os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import BOT_CONFIG, STARTING_BANKROLL, DRY_RUN, CITY_MODEL_TIER
+from config import BOT_CONFIG, STARTING_BANKROLL, DRY_RUN, CITY_MODEL_TIER, STRATEGY_BANKROLL_ID
 from models.database import (
     init_db, AsyncSessionLocal,
     Trade, BankrollState, ScanLog, CityCalibration,
@@ -19,20 +19,11 @@ from core.signals import get_bankroll
 from core.scanner import run_scan
 import httpx
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Weather Arb Bot", version="1.0.0")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app = FastAPI(title="Weather Arb Bot", version="2.0.0")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 _scan_running = False
 _last_scan_result = None
@@ -40,20 +31,17 @@ _last_scan_result = None
 
 @app.on_event("startup")
 async def startup():
-    logger.info("Starting Weather Arb Bot...")
+    logger.info("Starting Weather Arb Bot (A/B mode)...")
     await init_db()
-    logger.info(f"DB initialized | DRY_RUN={DRY_RUN} | Starting bankroll=${STARTING_BANKROLL}")
+    logger.info(f"DB initialized | DRY_RUN={DRY_RUN} | Starting bankroll=${STARTING_BANKROLL}/strategy")
     await _purge_old_bucket_diagnostics()
-
-    # Start background scheduler
     asyncio.create_task(scan_scheduler())
 
 
 async def scan_scheduler():
-    """Run scan every N seconds in background."""
     interval = BOT_CONFIG["scan_interval_seconds"]
     logger.info(f"Scanner starting — interval={interval}s")
-    await asyncio.sleep(10)  # Initial delay after startup
+    await asyncio.sleep(10)
     while True:
         try:
             await trigger_scan()
@@ -74,271 +62,161 @@ async def trigger_scan():
         _scan_running = False
 
 
-# ── API Endpoints ──────────────────────────────────────────────────────────────
+# ── Dashboard & Static ────────────────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_dashboard():
-    """Serve the dashboard HTML directly from Railway."""
-    import os
-    this_file = os.path.abspath(__file__)  # backend/api/main.py
-    api_dir = os.path.dirname(this_file)   # backend/api/
-    backend_dir = os.path.dirname(api_dir) # backend/
-    repo_dir = os.path.dirname(backend_dir) # repo root
-
-    # Search in likely locations
-    candidates = [
-        os.path.join(backend_dir, "weather-arb-dashboard.html"),
-        os.path.join(repo_dir, "weather-arb-dashboard.html"),
-        os.path.join(api_dir, "weather-arb-dashboard.html"),
-    ]
-    for html_path in candidates:
-        if os.path.exists(html_path):
-            with open(html_path, "r") as f:
-                return HTMLResponse(content=f.read())
-
-    # Debug: show what we searched
-    searched = ", ".join(candidates)
-    return HTMLResponse(
-        content=f"<h1>Dashboard not found</h1><p>Searched: {searched}</p>",
-        status_code=404
-    )
-
-
-@app.get("/analysis", response_class=HTMLResponse)
-async def serve_analysis():
-    """Serve the trade analysis dashboard."""
     import os
     this_file = os.path.abspath(__file__)
     api_dir = os.path.dirname(this_file)
     backend_dir = os.path.dirname(api_dir)
     repo_dir = os.path.dirname(backend_dir)
-
-    candidates = [
-        os.path.join(backend_dir, "weather-analysis.html"),
-        os.path.join(repo_dir, "weather-analysis.html"),
-        os.path.join(api_dir, "weather-analysis.html"),
-    ]
-    for html_path in candidates:
+    for html_path in [
+        os.path.join(backend_dir, "weather-arb-dashboard.html"),
+        os.path.join(repo_dir, "weather-arb-dashboard.html"),
+        os.path.join(api_dir, "weather-arb-dashboard.html"),
+    ]:
         if os.path.exists(html_path):
             with open(html_path, "r") as f:
                 return HTMLResponse(content=f.read())
+    return HTMLResponse(content="<h1>Dashboard not found</h1>", status_code=404)
 
-    return HTMLResponse(
-        content="<h1>Analysis dashboard not found</h1>",
-        status_code=404
-    )
 
+@app.get("/analysis", response_class=HTMLResponse)
+async def serve_analysis():
+    import os
+    this_file = os.path.abspath(__file__)
+    api_dir = os.path.dirname(this_file)
+    backend_dir = os.path.dirname(api_dir)
+    repo_dir = os.path.dirname(backend_dir)
+    for html_path in [
+        os.path.join(backend_dir, "weather-analysis.html"),
+        os.path.join(repo_dir, "weather-analysis.html"),
+        os.path.join(api_dir, "weather-analysis.html"),
+    ]:
+        if os.path.exists(html_path):
+            with open(html_path, "r") as f:
+                return HTMLResponse(content=f.read())
+    return HTMLResponse(content="<h1>Analysis dashboard not found</h1>", status_code=404)
+
+
+# ── Admin endpoints ───────────────────────────────────────────────────────────
 
 @app.post("/api/admin/reset-bankroll")
-async def reset_bankroll_endpoint():
-    """Hard reset bankroll to STARTING_BANKROLL. Use when balance is corrupted."""
+async def reset_bankroll_endpoint(strategy: str = "sigma"):
     async with AsyncSessionLocal() as session:
         async with session.begin():
-            bankroll_state = await get_bankroll(session)
+            bankroll_state = await get_bankroll(session, strategy)
             old_balance = bankroll_state.balance
             bankroll_state.balance = STARTING_BANKROLL
             bankroll_state.daily_loss_today = 0.0
             bankroll_state.last_reset_date = datetime.now(timezone.utc).date().isoformat()
-    return {
-        "status": "reset",
-        "previous_balance": old_balance,
-        "new_balance": STARTING_BANKROLL,
-    }
+    return {"status": "reset", "strategy": strategy, "previous_balance": old_balance, "new_balance": STARTING_BANKROLL}
 
 
 @app.post("/api/admin/reset-daily-loss")
-async def reset_daily_loss_endpoint():
-    """Force-reset the daily loss counter. Use when counter is stuck."""
+async def reset_daily_loss_endpoint(strategy: str = "sigma"):
     async with AsyncSessionLocal() as session:
         async with session.begin():
-            from core.signals import get_bankroll
-            bankroll_state = await get_bankroll(session)
+            bankroll_state = await get_bankroll(session, strategy)
             old_val = bankroll_state.daily_loss_today
             bankroll_state.daily_loss_today = 0.0
             bankroll_state.last_reset_date = datetime.now(timezone.utc).date().isoformat()
-    return {"status": "reset", "previous_daily_loss": old_val, "now": 0.0}
+    return {"status": "reset", "strategy": strategy, "previous_daily_loss": old_val, "now": 0.0}
 
 
 @app.post("/api/admin/purge-all-open-trades")
-async def purge_all_open_trades():
-    """Delete ALL open trades and refund their position sizes to bankroll."""
+async def purge_all_open_trades(strategy: str = None):
     async with AsyncSessionLocal() as session:
         async with session.begin():
-            bankroll_state = await get_bankroll(session)
-
-            result = await session.execute(
-                select(Trade).where(Trade.status == "OPEN")
-            )
+            q = select(Trade).where(Trade.status == "OPEN")
+            if strategy:
+                q = q.where(Trade.strategy == strategy)
+            result = await session.execute(q)
             open_trades = result.scalars().all()
 
             purged = []
             for trade in open_trades:
-                bankroll_state.balance = round(
-                    bankroll_state.balance + trade.position_size_usd, 2
-                )
-                purged.append({
-                    "city": trade.city,
-                    "threshold": trade.threshold_f,
-                    "direction": trade.direction,
-                    "size": trade.position_size_usd,
-                })
+                trade_strategy = trade.strategy or "sigma"
+                bs = await get_bankroll(session, trade_strategy)
+                bs.balance = round(bs.balance + trade.position_size_usd, 2)
+                purged.append({"city": trade.city, "threshold": trade.threshold_f, "direction": trade.direction, "size": trade.position_size_usd, "strategy": trade_strategy})
                 await session.delete(trade)
 
-            logger.info(f"[PURGE-ALL] Deleted {len(purged)} open trades, bankroll restored to ${bankroll_state.balance}")
-
-    return {
-        "status": "done",
-        "purged_count": len(purged),
-        "bankroll_after": bankroll_state.balance,
-        "purged_trades": purged,
-    }
+    return {"status": "done", "purged_count": len(purged), "purged_trades": purged}
 
 
 @app.post("/api/admin/purge-stale-trades")
 async def purge_stale_trades():
-    """
-    Delete open trades whose market_date is before today.
-    Uses trade.market_date directly — no title/condition parsing.
-    Also refunds position size back to bankroll.
-    """
     today = datetime.now(timezone.utc).date()
     purged = []
-    kept = []
-
     async with AsyncSessionLocal() as session:
         async with session.begin():
-            bankroll_state = await get_bankroll(session)
-
-            result = await session.execute(
-                select(Trade).where(Trade.status == "OPEN")
-            )
+            result = await session.execute(select(Trade).where(Trade.status == "OPEN"))
             open_trades = result.scalars().all()
-
             for trade in open_trades:
-                # Primary: use market_date field (the actual date being bet on)
                 is_stale = False
-                reason = ""
-
                 if trade.market_date:
                     try:
                         mkt_date = datetime.strptime(trade.market_date, "%Y-%m-%d").date()
                         if mkt_date < today:
                             is_stale = True
-                            reason = f"market_date {mkt_date} < today {today}"
                     except Exception:
                         pass
-
-                # Fallback: if market_date missing, use opened_at
                 if not is_stale and not trade.market_date:
                     if trade.opened_at and trade.opened_at.date() < today:
                         is_stale = True
-                        reason = f"no market_date, opened_at {trade.opened_at.date()} < today {today}"
-
                 if is_stale:
-                    bankroll_state.balance = round(
-                        bankroll_state.balance + trade.position_size_usd, 2
-                    )
-                    purged.append({
-                        "id": trade.id,
-                        "city": trade.city,
-                        "threshold": trade.threshold_f,
-                        "direction": trade.direction,
-                        "size": trade.position_size_usd,
-                        "reason": reason,
-                    })
+                    trade_strategy = trade.strategy or "sigma"
+                    bs = await get_bankroll(session, trade_strategy)
+                    bs.balance = round(bs.balance + trade.position_size_usd, 2)
+                    purged.append({"id": trade.id, "city": trade.city, "strategy": trade_strategy})
                     await session.delete(trade)
-                    logger.info(
-                        f"[PURGE-STALE] {trade.city} >={trade.threshold_f} {trade.direction} | "
-                        f"${trade.position_size_usd} refunded | {reason}"
-                    )
-                else:
-                    kept.append(f"{trade.city} >={trade.threshold_f} {trade.direction}")
-
-    return {
-        "status": "done",
-        "purged_count": len(purged),
-        "kept_count": len(kept),
-        "bankroll_after": bankroll_state.balance,
-        "purged_trades": purged,
-        "kept_trades": kept,
-    }
+    return {"status": "done", "purged_count": len(purged), "purged_trades": purged}
 
 
-@app.post("/api/admin/delete-trades")
-async def delete_specific_trades():
-    """
-    One-time cleanup — delete specific bad trades by ID and refund bankroll.
-    Currently set to [87] (Dallas positional indexing artifact — already executed).
-    """
-    trade_ids = [87]
-    async with AsyncSessionLocal() as session:
-        async with session.begin():
-            bankroll_state = await get_bankroll(session)
-            result = await session.execute(
-                select(Trade).where(Trade.id.in_(trade_ids))
-            )
-            trades = result.scalars().all()
-            refunded = 0.0
-            deleted = []
-            for trade in trades:
-                if trade.status == "OPEN":
-                    bankroll_state.balance = round(
-                        bankroll_state.balance + trade.position_size_usd, 2
-                    )
-                    refunded += trade.position_size_usd
-                elif trade.status == "LOSS":
-                    # Reverse the loss — trade should never have existed
-                    bankroll_state.balance = round(
-                        bankroll_state.balance + trade.position_size_usd, 2
-                    )
-                    refunded += trade.position_size_usd
-                deleted.append({
-                    "id": trade.id,
-                    "city": trade.city,
-                    "threshold": trade.threshold_f,
-                    "direction": trade.direction,
-                    "size": trade.position_size_usd,
-                })
-                await session.delete(trade)
-                logger.info(
-                    f"[DELETE-TRADE] #{trade.id} {trade.city} >={trade.threshold_f} "
-                    f"{trade.direction} | ${trade.position_size_usd} refunded"
-                )
-
-    return {
-        "status": "done",
-        "deleted_count": len(deleted),
-        "refunded": round(refunded, 2),
-        "bankroll_after": bankroll_state.balance,
-        "deleted_trades": deleted,
-    }
-
+# ── Core API ──────────────────────────────────────────────────────────────────
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "dry_run": DRY_RUN, "timestamp": datetime.now(timezone.utc).isoformat()}
+    return {"status": "ok", "dry_run": DRY_RUN, "mode": "ab_testing", "timestamp": datetime.now(timezone.utc).isoformat()}
 
 
 @app.post("/api/scan")
 async def manual_scan(background_tasks: BackgroundTasks):
-    """Trigger a manual scan (runs in background)."""
     if _scan_running:
         return {"status": "already_running"}
     background_tasks.add_task(trigger_scan)
     return {"status": "started"}
 
 
-@app.get("/api/dashboard")
-async def dashboard():
-    """All data needed for frontend in one call."""
+@app.get("/api/trades")
+async def get_trades(status: str = None, city: str = None, strategy: str = None, limit: int = 100):
     async with AsyncSessionLocal() as session:
-        # Bankroll
-        bankroll = await get_bankroll(session)
+        q = select(Trade).order_by(desc(Trade.opened_at))
+        if status:
+            q = q.where(Trade.status == status.upper())
+        if city:
+            q = q.where(Trade.city == city)
+        if strategy:
+            q = q.where(Trade.strategy == strategy)
+        result = await session.execute(q.limit(limit))
+        trades = result.scalars().all()
+        return [_trade_to_dict(t) for t in trades]
 
-        # Trades
-        all_trades_result = await session.execute(
-            select(Trade).order_by(desc(Trade.opened_at)).limit(200)
-        )
+
+@app.get("/api/dashboard")
+async def dashboard(strategy: str = None):
+    """Dashboard data with optional strategy filter. No filter = all trades combined."""
+    async with AsyncSessionLocal() as session:
+        bankroll_b = await get_bankroll(session, "sigma")
+        bankroll_a = await get_bankroll(session, "forecast_edge")
+
+        # Trades query with optional strategy filter
+        q = select(Trade).order_by(desc(Trade.opened_at)).limit(200)
+        if strategy:
+            q = q.where(Trade.strategy == strategy)
+        all_trades_result = await session.execute(q)
         all_trades = all_trades_result.scalars().all()
 
         open_trades = [t for t in all_trades if t.status == "OPEN"]
@@ -346,31 +224,30 @@ async def dashboard():
         wins = [t for t in settled if t.status == "WIN"]
         losses = [t for t in settled if t.status == "LOSS"]
 
-        # Stats
         total_net_pnl = sum(t.net_pnl or 0 for t in settled)
         total_fees = sum(t.fees_usd or 0 for t in settled)
         win_rate = (len(wins) / len(settled) * 100) if settled else 0
         avg_edge = (sum(t.edge_pct for t in settled) / len(settled) * 100) if settled else 0
-
-        # Average win/loss
         avg_win = (sum(t.net_pnl for t in wins) / len(wins)) if wins else 0
         avg_loss = (sum(t.net_pnl for t in losses) / len(losses)) if losses else 0
+        ev_per_trade = ((win_rate/100 * avg_win) + ((1 - win_rate/100) * avg_loss)) if settled else 0
 
-        # Expected value per trade
-        ev_per_trade = (
-            (win_rate/100 * avg_win) + ((1 - win_rate/100) * avg_loss)
-        ) if settled else 0
-
-        # Profit factor
         gross_wins = sum(t.gross_pnl for t in wins if t.gross_pnl)
         gross_losses = abs(sum(t.gross_pnl for t in losses if t.gross_pnl))
         profit_factor = (gross_wins / gross_losses) if gross_losses > 0 else 0
 
-        # Max drawdown
-        running_bal = STARTING_BANKROLL
-        peak = STARTING_BANKROLL
+        # Equity curve — use appropriate starting bankroll
+        if strategy == "sigma":
+            start_bal = bankroll_b.starting_balance
+        elif strategy == "forecast_edge":
+            start_bal = bankroll_a.starting_balance
+        else:
+            start_bal = bankroll_b.starting_balance + bankroll_a.starting_balance
+
+        running_bal = start_bal
+        peak = start_bal
         max_dd = 0
-        equity_curve = [STARTING_BANKROLL]
+        equity_curve = [start_bal]
         for t in sorted(settled, key=lambda x: x.resolved_at or datetime.min):
             running_bal += (t.net_pnl or 0)
             equity_curve.append(round(running_bal, 2))
@@ -380,23 +257,17 @@ async def dashboard():
             if dd > max_dd:
                 max_dd = dd
 
-        # Sharpe (simplified: mean/std of net_pnls)
         import numpy as np
         pnls = [t.net_pnl for t in settled if t.net_pnl is not None]
         sharpe = (np.mean(pnls) / np.std(pnls)) if len(pnls) > 1 else 0
 
-        # Calibration
         cal_result = await session.execute(
-            select(CityCalibration)
-            .where(CityCalibration.actual_high_f.isnot(None))
-            .order_by(desc(CityCalibration.recorded_at))
-            .limit(100)
+            select(CityCalibration).where(CityCalibration.actual_high_f.isnot(None)).order_by(desc(CityCalibration.recorded_at)).limit(100)
         )
         cal_rows = cal_result.scalars().all()
         cal_errors = [abs(r.forecast_error_f) for r in cal_rows if r.forecast_error_f is not None]
         mean_abs_error = round(float(np.mean(cal_errors)), 2) if cal_errors else None
 
-        # By-city breakdown
         city_stats = {}
         for t in settled:
             c = t.city
@@ -413,35 +284,30 @@ async def dashboard():
             s["avg_edge"] = round(s["edge_sum"] / s["trades"] * 100, 1)
             del s["edge_sum"]
 
-        # Recent scan logs
-        scan_log_result = await session.execute(
-            select(ScanLog).order_by(desc(ScanLog.scanned_at)).limit(20)
-        )
+        scan_log_result = await session.execute(select(ScanLog).order_by(desc(ScanLog.scanned_at)).limit(20))
         scan_logs = scan_log_result.scalars().all()
+
+        # ── Strategy comparison bar (always returned) ─────────────────────────
+        comparison = await _build_strategy_comparison(session)
 
         return {
             "bankroll": {
-                "current": round(bankroll.balance, 2),
-                "starting": bankroll.starting_balance,
-                "pnl": round(bankroll.balance - bankroll.starting_balance, 2),
-                "pnl_pct": round((bankroll.balance - bankroll.starting_balance) / bankroll.starting_balance * 100, 2),
-                "daily_loss_today": round(bankroll.daily_loss_today, 2),
+                "sigma": {"current": round(bankroll_b.balance, 2), "starting": bankroll_b.starting_balance, "pnl": round(bankroll_b.balance - bankroll_b.starting_balance, 2)},
+                "forecast_edge": {"current": round(bankroll_a.balance, 2), "starting": bankroll_a.starting_balance, "pnl": round(bankroll_a.balance - bankroll_a.starting_balance, 2)},
+                "combined": {"current": round(bankroll_b.balance + bankroll_a.balance, 2), "starting": bankroll_b.starting_balance + bankroll_a.starting_balance},
+                "daily_loss_sigma": round(bankroll_b.daily_loss_today, 2),
+                "daily_loss_forecast_edge": round(bankroll_a.daily_loss_today, 2),
             },
             "performance": {
-                "total_trades": len(settled),
-                "open_positions": len(open_trades),
-                "win_rate": round(win_rate, 1),
-                "avg_edge_pct": round(avg_edge, 1),
-                "total_net_pnl": round(total_net_pnl, 2),
-                "total_fees": round(total_fees, 2),
-                "avg_win": round(avg_win, 2),
-                "avg_loss": round(avg_loss, 2),
-                "ev_per_trade": round(ev_per_trade, 2),
-                "profit_factor": round(profit_factor, 2),
-                "max_drawdown_pct": round(max_dd, 2),
-                "sharpe": round(float(sharpe), 3),
+                "total_trades": len(settled), "open_positions": len(open_trades),
+                "win_rate": round(win_rate, 1), "avg_edge_pct": round(avg_edge, 1),
+                "total_net_pnl": round(total_net_pnl, 2), "total_fees": round(total_fees, 2),
+                "avg_win": round(avg_win, 2), "avg_loss": round(avg_loss, 2),
+                "ev_per_trade": round(ev_per_trade, 2), "profit_factor": round(profit_factor, 2),
+                "max_drawdown_pct": round(max_dd, 2), "sharpe": round(float(sharpe), 3),
                 "mean_abs_forecast_error_f": mean_abs_error,
             },
+            "strategy_comparison": comparison,
             "equity_curve": equity_curve,
             "open_positions": [_trade_to_dict(t) for t in open_trades],
             "trade_history": [_trade_to_dict(t) for t in settled[:50]],
@@ -451,20 +317,35 @@ async def dashboard():
             "dry_run": DRY_RUN,
             "scan_running": _scan_running,
             "last_scan": _last_scan_result,
+            "filter": strategy or "all",
         }
 
 
-@app.get("/api/trades")
-async def get_trades(status: str = None, city: str = None, limit: int = 100):
-    async with AsyncSessionLocal() as session:
-        q = select(Trade).order_by(desc(Trade.opened_at))
-        if status:
-            q = q.where(Trade.status == status.upper())
-        if city:
-            q = q.where(Trade.city == city)
-        result = await session.execute(q.limit(limit))
-        trades = result.scalars().all()
-        return [_trade_to_dict(t) for t in trades]
+async def _build_strategy_comparison(session):
+    """Build side-by-side strategy comparison data."""
+    result = {}
+    for strat in ["sigma", "forecast_edge"]:
+        q = select(Trade).where(Trade.status.in_(["WIN", "LOSS"]), Trade.strategy == strat)
+        trades_result = await session.execute(q)
+        trades = trades_result.scalars().all()
+        wins = [t for t in trades if t.status == "WIN"]
+        losses = [t for t in trades if t.status == "LOSS"]
+        total_pnl = sum(t.net_pnl or 0 for t in trades)
+        win_rate = (len(wins) / len(trades) * 100) if trades else 0
+        pnl_per_trade = (total_pnl / len(trades)) if trades else 0
+
+        # Open count
+        open_q = await session.execute(select(Trade).where(Trade.status == "OPEN", Trade.strategy == strat))
+        open_count = len(open_q.scalars().all())
+
+        result[strat] = {
+            "settled_trades": len(trades), "wins": len(wins), "losses": len(losses),
+            "open_positions": open_count,
+            "win_rate": round(win_rate, 1),
+            "total_pnl": round(total_pnl, 2),
+            "pnl_per_trade": round(pnl_per_trade, 2),
+        }
+    return result
 
 
 @app.get("/api/calibration")
@@ -475,25 +356,16 @@ async def get_calibration(city: str = None, limit: int = 60):
             q = q.where(CityCalibration.city == city)
         result = await session.execute(q.limit(limit))
         rows = result.scalars().all()
-        return [
-            {
-                "city": r.city,
-                "date": r.date,
-                "forecast_high": r.forecast_high,
-                "actual_high_f": r.actual_high_f,
-                "forecast_error_f": r.forecast_error_f,
-                "sigma_used": r.sigma_used,
-            }
-            for r in rows
-        ]
+        return [{"city": r.city, "date": r.date, "forecast_high": r.forecast_high, "actual_high_f": r.actual_high_f, "forecast_error_f": r.forecast_error_f, "sigma_used": r.sigma_used} for r in rows]
 
 
 @app.get("/api/stats/by-city")
-async def stats_by_city():
+async def stats_by_city(strategy: str = None):
     async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(Trade).where(Trade.status.in_(["WIN", "LOSS"]))
-        )
+        q = select(Trade).where(Trade.status.in_(["WIN", "LOSS"]))
+        if strategy:
+            q = q.where(Trade.strategy == strategy)
+        result = await session.execute(q)
         trades = result.scalars().all()
         breakdown = {}
         for t in trades:
@@ -514,26 +386,18 @@ async def stats_by_city():
 
 
 @app.get("/api/stats/by-model")
-async def stats_by_model():
-    """Performance breakdown by forecast model tier (NOAA, ICON, JMA)."""
+async def stats_by_model(strategy: str = None):
     async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(Trade).where(Trade.status.in_(["WIN", "LOSS"]))
-        )
+        q = select(Trade).where(Trade.status.in_(["WIN", "LOSS"]))
+        if strategy:
+            q = q.where(Trade.strategy == strategy)
+        result = await session.execute(q)
         trades = result.scalars().all()
         breakdown = {}
         for t in trades:
             tier = CITY_MODEL_TIER.get(t.city, "unknown")
             if tier not in breakdown:
-                breakdown[tier] = {
-                    "model_tier": tier,
-                    "cities": set(),
-                    "trades": 0,
-                    "wins": 0,
-                    "pnl": 0.0,
-                    "edges": [],
-                    "forecast_errors": [],
-                }
+                breakdown[tier] = {"model_tier": tier, "cities": set(), "trades": 0, "wins": 0, "pnl": 0.0, "edges": [], "forecast_errors": []}
             breakdown[tier]["cities"].add(t.city)
             breakdown[tier]["trades"] += 1
             breakdown[tier]["pnl"] = round(breakdown[tier]["pnl"] + (t.net_pnl or 0), 2)
@@ -553,45 +417,50 @@ async def stats_by_model():
         return list(breakdown.values())
 
 
+@app.get("/api/stats/by-strategy")
+async def stats_by_strategy():
+    """Direct strategy comparison endpoint."""
+    async with AsyncSessionLocal() as session:
+        return await _build_strategy_comparison(session)
+
+
+# ── Trade dict helper ─────────────────────────────────────────────────────────
+
 def _trade_to_dict(t: Trade) -> dict:
     return {
-        "id": t.id,
-        "city": t.city,
-        "station": t.station_id,
+        "id": t.id, "city": t.city, "station": t.station_id,
         "model_tier": CITY_MODEL_TIER.get(t.city, "unknown"),
-        "threshold_f": t.threshold_f,
-        "direction": t.direction,
-        "market_condition": t.market_condition,
-        "market_date": t.market_date,
-        "market_yes_price": t.market_yes_price,
-        "market_volume": t.market_volume,
+        "threshold_f": t.threshold_f, "direction": t.direction,
+        "market_condition": t.market_condition, "market_date": t.market_date,
+        "market_yes_price": t.market_yes_price, "market_volume": t.market_volume,
         "noaa_forecast_high": t.noaa_forecast_high,
         "gfs_forecast": t.gfs_forecast,
-        "icon_forecast": t.ecmwf_forecast,  # DB column still named ecmwf_forecast; now stores ICON
+        "icon_forecast": t.ecmwf_forecast,
         "models_agreed": t.models_agreed,
-        "noaa_sigma": t.noaa_sigma,
-        "noaa_true_prob": t.noaa_true_prob,
+        "noaa_sigma": t.noaa_sigma, "noaa_true_prob": t.noaa_true_prob,
         "noaa_condition": t.noaa_condition,
         "edge_pct": round(t.edge_pct * 100, 1),
         "confidence": round(t.confidence * 100, 1),
-        "kelly_raw": t.kelly_raw,
-        "kelly_capped": t.kelly_capped,
-        "position_size_usd": t.position_size_usd,
-        "entry_price": t.entry_price,
-        "shares": t.shares,
-        "bankroll_at_entry": t.bankroll_at_entry,
-        "status": t.status,
-        "actual_high_f": t.actual_high_f,
-        "gross_pnl": t.gross_pnl,
-        "fees_usd": t.fees_usd,
-        "net_pnl": t.net_pnl,
-        "bankroll_after": t.bankroll_after,
+        "kelly_raw": t.kelly_raw, "kelly_capped": t.kelly_capped,
+        "position_size_usd": t.position_size_usd, "entry_price": t.entry_price,
+        "shares": t.shares, "bankroll_at_entry": t.bankroll_at_entry,
+        "status": t.status, "actual_high_f": t.actual_high_f,
+        "gross_pnl": t.gross_pnl, "fees_usd": t.fees_usd,
+        "net_pnl": t.net_pnl, "bankroll_after": t.bankroll_after,
         "forecast_error_f": t.forecast_error_f,
         "forecast_day_offset": t.forecast_day_offset,
         "entry_number": t.entry_number,
         "opened_at": t.opened_at.isoformat() if t.opened_at else None,
         "resolved_at": t.resolved_at.isoformat() if t.resolved_at else None,
         "polymarket_market_id": t.polymarket_market_id,
+        # A/B testing fields
+        "strategy": t.strategy or "sigma",
+        "forecast_gap": t.forecast_gap,
+        "validator_gap": t.validator_gap,
+        "same_side_as_forecast": t.same_side_as_forecast,
+        "models_directionally_agree": t.models_directionally_agree,
+        "models_on_bet_side_count": t.models_on_bet_side_count,
+        "model_count": t.model_count,
     }
 
 
@@ -599,150 +468,36 @@ def _scan_log_to_dict(s: ScanLog) -> dict:
     return {
         "id": s.id,
         "scanned_at": s.scanned_at.isoformat() if s.scanned_at else None,
-        "cities_scanned": s.cities_scanned,
-        "signals_found": s.signals_found,
-        "trades_opened": s.trades_opened,
-        "trades_settled": s.trades_settled,
-        "bankroll_snapshot": s.bankroll_snapshot,
-        "errors": s.errors,
-        "duration_ms": s.duration_ms,
+        "cities_scanned": s.cities_scanned, "signals_found": s.signals_found,
+        "trades_opened": s.trades_opened, "trades_settled": s.trades_settled,
+        "bankroll_snapshot": s.bankroll_snapshot, "errors": s.errors, "duration_ms": s.duration_ms,
     }
 
 
+# ── Bucket mapping diagnostics (unchanged) ───────────────────────────────────
+
 async def _purge_old_bucket_diagnostics():
-    """Delete bucket_mapping_diagnostics rows older than 7 days. Safe to call on startup."""
     from sqlalchemy import delete
-    # scanned_at is stored as naive datetime in DB (DateTime without timezone=True),
-    # so cutoff must also be naive to avoid "can't subtract offset-naive and offset-aware" error.
     cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=7)
     try:
         async with AsyncSessionLocal() as session:
             async with session.begin():
-                result = await session.execute(
-                    delete(BucketMappingDiagnostic).where(
-                        BucketMappingDiagnostic.scanned_at < cutoff
-                    )
-                )
-                deleted = result.rowcount
-                if deleted:
-                    logger.info(f"[BUCKET] Purged {deleted} diagnostic rows older than 7 days")
+                result = await session.execute(delete(BucketMappingDiagnostic).where(BucketMappingDiagnostic.scanned_at < cutoff))
+                if result.rowcount:
+                    logger.info(f"[BUCKET] Purged {result.rowcount} diagnostic rows older than 7 days")
     except Exception as e:
         logger.warning(f"[BUCKET] Purge failed (non-fatal): {e}")
 
 
-@app.get("/api/debug/bucket-mapping/summary")
-async def bucket_mapping_summary():
-    """
-    Daily summary of bucket mapping diagnostics.
-    Returns counts by match type, avg prob gap, and top 10 mismatches.
-    """
-
-    async with AsyncSessionLocal() as session:
-        now_utc = datetime.now(timezone.utc)
-        today_str = now_utc.date().isoformat()
-        day_start = datetime(now_utc.year, now_utc.month, now_utc.day)  # naive to match DB column
-
-        result = await session.execute(
-            select(BucketMappingDiagnostic)
-            .where(BucketMappingDiagnostic.scanned_at >= day_start)
-            .order_by(desc(BucketMappingDiagnostic.scanned_at))
-        )
-        rows = result.scalars().all()
-
-        if not rows:
-            return {"today": today_str, "mapped_candidates": 0, "message": "No bucket diagnostics today. Is BUCKET_MAPPING=1 set?"}
-
-        counts = {"exact": 0, "nearest": 0, "basket_only": 0, "parse_fail": 0}
-        gaps = []
-        for r in rows:
-            mt = r.match_type if r.match_type in counts else "parse_fail"
-            counts[mt] += 1
-            if r.prob_gap is not None:
-                gaps.append((r.prob_gap, r))
-
-        avg_gap = round(sum(g[0] for g in gaps) / len(gaps), 4) if gaps else None
-        top_mismatches = sorted(gaps, key=lambda x: x[0], reverse=True)[:10]
-
-        return {
-            "today": today_str,
-            "mapped_candidates": len(rows),
-            "exact": counts["exact"],
-            "nearest": counts["nearest"],
-            "basket_only": counts["basket_only"],
-            "parse_fail": counts["parse_fail"],
-            "avg_gap_synthetic_vs_basket": avg_gap,
-            "top_mismatches": [
-                {
-                    "city": r.city,
-                    "threshold": r.threshold,
-                    "direction": r.direction,
-                    "synthetic_prob": r.synthetic_prob,
-                    "basket_yes_prob": r.basket_yes_prob,
-                    "prob_gap": r.prob_gap,
-                    "match_type": r.match_type,
-                    "note": r.approximation_note,
-                }
-                for _, r in top_mismatches
-            ],
-        }
-
-
-@app.get("/api/debug/bucket-mapping/detail")
-async def bucket_mapping_detail(limit: int = 100):
-    """
-    Last N bucket mapping diagnostic rows, newest first.
-    Default 100, max 200.
-    """
-    limit = min(limit, 200)
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(BucketMappingDiagnostic)
-            .order_by(desc(BucketMappingDiagnostic.scanned_at))
-            .limit(limit)
-        )
-        rows = result.scalars().all()
-        return [
-            {
-                "id": r.id,
-                "scanned_at": r.scanned_at.isoformat() if r.scanned_at else None,
-                "city": r.city,
-                "market_date": r.market_date,
-                "threshold": r.threshold,
-                "direction": r.direction,
-                "synthetic_prob": r.synthetic_prob,
-                "synthetic_edge": r.synthetic_edge,
-                "match_type": r.match_type,
-                "is_directly_tradable": r.is_directly_tradable,
-                "nearest_bucket_label": r.nearest_bucket_label,
-                "basket_count": r.basket_count,
-                "basket_yes_prob": r.basket_yes_prob,
-                "prob_gap": r.prob_gap,
-                "approximation_note": r.approximation_note,
-                "polymarket_market_id": r.polymarket_market_id,
-            }
-            for r in rows
-        ]
-
-
 @app.get("/api/debug/markets")
 async def debug_markets():
-    """
-    Test the slug-based event discovery path — mirrors MAX_FORWARD_DAYS logic.
-    Tries today, +1, +2 for each city and reports the first valid event found.
-    Shows exactly what build_market_map would find.
-    """
     from data.polymarket import build_slug, fetch_event_by_slug, CITY_SLUGS, MAX_FORWARD_DAYS
-
     utc_today = datetime.now(timezone.utc).date()
     results = {}
-
     async with httpx.AsyncClient() as client:
         for city in CITY_SLUGS:
-            event = None
-            slug = None
+            event = None; slug = None; found_date = None
             rejection = f"No valid event in next {MAX_FORWARD_DAYS} days"
-            found_date = None
-
             for day_offset in range(MAX_FORWARD_DAYS):
                 target_date = utc_today + timedelta(days=day_offset)
                 slug = build_slug(city, target_date)
@@ -750,45 +505,14 @@ async def debug_markets():
                 if event:
                     found_date = target_date.isoformat()
                     break
-
             if event:
                 markets = event.get("markets", [])
-                summed_bucket_vol = sum(
-                    float(m.get("volumeNum") or m.get("volume") or 0)
-                    for m in markets
-                )
-                sample_buckets = [
-                    {
-                        "label": m.get("groupItemTitle") or m.get("question", ""),
-                        "outcomePrices": m.get("outcomePrices"),
-                        "bucket_volume": float(m.get("volumeNum") or m.get("volume") or 0),
-                    }
-                    for m in markets[:3]
-                ]
                 results[city] = {
-                    "status": "found",
-                    "market_date": found_date,
-                    "slug": slug,
-                    "title": event.get("title", ""),
-                    "endDate": event.get("endDate") or event.get("end_date"),
-                    "active": event.get("active"),
-                    "closed": event.get("closed"),
-                    "bucket_count": len(markets),
+                    "status": "found", "market_date": found_date, "slug": slug,
+                    "title": event.get("title", ""), "bucket_count": len(markets),
                     "event_volume": float(event.get("volumeNum") or event.get("volume") or 0),
-                    "summed_bucket_volume": round(summed_bucket_vol, 2),
-                    "sample_buckets": sample_buckets,
                 }
             else:
-                results[city] = {
-                    "status": "not_found",
-                    "slug": slug,
-                    "rejection": rejection,
-                }
-
+                results[city] = {"status": "not_found", "slug": slug, "rejection": rejection}
     found = sum(1 for v in results.values() if v["status"] == "found")
-    return {
-        "utc_now": datetime.now(timezone.utc).isoformat(),
-        "cities_found": found,
-        "cities_checked": len(CITY_SLUGS),
-        "results": results,
-    }
+    return {"utc_now": datetime.now(timezone.utc).isoformat(), "cities_found": found, "results": results}

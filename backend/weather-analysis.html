@@ -159,10 +159,22 @@ const API = window.location.origin;
 
 let allTrades = [];
 let excludeFlagged = false;
+let currentStrategy = null;  // null = all, "sigma", "forecast_edge"
 
 async function fetchTrades() {
-  const r = await fetch(`${API}/api/trades?limit=500`);
+  const stratParam = currentStrategy ? `&strategy=${currentStrategy}` : '';
+  const r = await fetch(`${API}/api/trades?limit=500${stratParam}`);
   return await r.json();
+}
+
+function setStrategy(strat) {
+  currentStrategy = strat;
+  loadAndRender();
+}
+
+async function loadAndRender() {
+  allTrades = await fetchTrades();
+  render(allTrades);
 }
 
 // Detect international trades from market_condition unit (°C vs °F).
@@ -212,6 +224,9 @@ function render(trades) {
       <div class="header-controls">
         <span class="status-dot"></span>
         <span class="last-updated">${closed.length} closed · ${openTrades.length} open · updated ${new Date().toLocaleTimeString()}</span>
+        <button class="toggle-btn ${currentStrategy === null ? 'active' : ''}" onclick="setStrategy(null)">All</button>
+        <button class="toggle-btn ${currentStrategy === 'sigma' ? 'active' : ''}" onclick="setStrategy('sigma')">Sigma</button>
+        <button class="toggle-btn ${currentStrategy === 'forecast_edge' ? 'active' : ''}" onclick="setStrategy('forecast_edge')">Edge</button>
         <button class="toggle-btn ${excludeFlagged ? 'active' : ''}" onclick="toggleFlag()">
           ${excludeFlagged ? '✓ ' : ''}Exclude flagged
         </button>
@@ -757,9 +772,9 @@ function buildForecastActual(closed) {
   const avgOrDash = arr => arr.length ? (arr.reduce((a,b)=>a+b,0)/arr.length).toFixed(1) + '°' : '—';
 
   table.innerHTML = `<thead><tr>
-    <th></th><th>City</th><th>Date</th><th>D+</th><th>Dir</th><th>Threshold</th>
+    <th></th><th>City</th><th>Strat</th><th>Date</th><th>D+</th><th>Dir</th><th>Threshold</th>
     <th style="color:#3b82f6">NOAA</th><th style="color:#a855f7">ICON</th><th style="color:#f472b6">JMA</th><th style="color:#14b8a6">GFS</th><th>Actual</th>
-    <th>Error</th><th>Result</th><th>Net P&L</th>
+    <th>Error</th><th>Gap</th><th>Result</th><th>Net P&L</th>
   </tr></thead><tbody>` + closed.map(t => {
     const flag = isFlagged(t);
     const flagHtml = flag ? `<span class="flag-icon" title="${flag}">⚠️</span>` : '';
@@ -775,9 +790,15 @@ function buildForecastActual(closed) {
     const iconVal = tier === 'ICON' ? t.noaa_forecast_high : (tier === 'NOAA' ? t.icon_forecast : null);
     const jmaVal  = tier === 'JMA' ? t.noaa_forecast_high : null;
 
+    const strat = t.strategy || 'sigma';
+    const stratColor = strat === 'forecast_edge' ? 'var(--green)' : 'var(--cyan)';
+    const stratLabel = strat === 'forecast_edge' ? 'EDGE' : 'SIG';
+    const gapStr = t.forecast_gap != null ? (t.forecast_gap >= 0 ? '+' : '') + t.forecast_gap.toFixed(1) : '—';
+
     return `<tr>
       <td>${flagHtml}</td>
       <td>${t.city}</td>
+      <td><span style="font-size:10px;color:${stratColor};font-weight:600">${stratLabel}</span></td>
       <td>${(t.market_date || '').substring(5)}</td>
       <td style="color:var(--cyan);font-size:11px;">${t.forecast_day_offset ?? 0}</td>
       <td>${t.direction}</td>
@@ -788,34 +809,35 @@ function buildForecastActual(closed) {
       <td>${fmt(t.gfs_forecast)}</td>
       <td><strong>${fmt(t.actual_high_f)}</strong></td>
       <td><span class="chip ${errChip}">${t.forecast_error_f != null ? (t.forecast_error_f > 0 ? '+' : '') + t.forecast_error_f.toFixed(1) + '°' : '—'}</span></td>
+      <td style="color:${(t.forecast_gap||0) >= 0 ? 'var(--green)' : 'var(--red)'};font-size:11px">${gapStr}</td>
       <td><span class="chip ${resultChip}">${t.status}</span></td>
       <td class="${(t.net_pnl||0) >= 0 ? 'positive' : 'negative'}">$${(t.net_pnl||0) >= 0 ? '+' : ''}${(t.net_pnl||0).toFixed(2)}</td>
     </tr>`;
   }).join('') + `</tbody>
   <tfoot>
   <tr style="border-top:2px solid var(--border);font-weight:600;">
-    <td></td><td colspan="5" style="color:var(--text2);">MAE — US (°F)</td>
+    <td></td><td colspan="6" style="color:var(--text2);">MAE — US (°F)</td>
     <td style="color:#3b82f6">${avgOrDash(noaaErrs)}</td>
     <td style="color:var(--text2);">—</td>
     <td style="color:var(--text2);">—</td>
     <td style="color:#14b8a6">${avgOrDash(gfsErrsUS)}</td>
-    <td colspan="4"></td>
+    <td colspan="5"></td>
   </tr>
   <tr style="font-weight:600;">
-    <td></td><td colspan="5" style="color:var(--text2);">MAE — Europe (°C)</td>
+    <td></td><td colspan="6" style="color:var(--text2);">MAE — Europe (°C)</td>
     <td style="color:var(--text2);">—</td>
     <td style="color:#a855f7">${avgOrDash(iconErrs)}</td>
     <td style="color:var(--text2);">—</td>
     <td style="color:#14b8a6">${avgOrDash(gfsErrsEU)}</td>
-    <td colspan="4"></td>
+    <td colspan="5"></td>
   </tr>
   <tr style="font-weight:600;">
-    <td></td><td colspan="5" style="color:var(--text2);">MAE — East Asia (°C)</td>
+    <td></td><td colspan="6" style="color:var(--text2);">MAE — East Asia (°C)</td>
     <td style="color:var(--text2);">—</td>
     <td style="color:var(--text2);">—</td>
     <td style="color:#f472b6">${avgOrDash(jmaErrs)}</td>
     <td style="color:#14b8a6">${avgOrDash(gfsErrsAsia)}</td>
-    <td colspan="4"></td>
+    <td colspan="5"></td>
   </tr>
   </tfoot>`;
 }
@@ -832,6 +854,9 @@ fetchTrades().then(trades => {
 }).catch(err => {
   document.getElementById('app').innerHTML = `<div class="loading" style="color:var(--red)">Failed to load: ${err.message}</div>`;
 });
+
+// Auto-refresh every 60s
+setInterval(() => loadAndRender().catch(console.error), 60000);
 </script>
 </body>
 </html>

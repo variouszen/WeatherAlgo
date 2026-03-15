@@ -1,7 +1,11 @@
-# Weather Arb Bot 🌡️
-**Paper trading simulator — real NOAA + real Polymarket prices, fake money**
+# Weather Arb Bot 🌡️ — A/B Testing Mode
+**Paper trading simulator — two strategies, one data spine, separate bankrolls**
 
-Scans live Polymarket temperature markets every 5 minutes, computes true probability from NOAA/NWS forecasts, and paper trades when edge > 8%. All state persists in Postgres — survives Railway restarts.
+Runs two competing trading strategies on Polymarket temperature markets:
+- **Strategy B (Sigma):** Sigma-driven probability edge, high volume, 12-gate stack
+- **Strategy A (Forecast Edge):** Forecast must clear threshold by ≥4°F/2°C, low volume, 7-gate stack
+
+Both share the same forecast pipeline and market data. Each has its own $2,000 bankroll.
 
 ---
 
@@ -9,71 +13,45 @@ Scans live Polymarket temperature markets every 5 minutes, computes true probabi
 
 | Component | Real or Simulated |
 |-----------|------------------|
-| NOAA forecast high/low | ✅ Real — direct NWS API |
-| Polymarket Yes/No prices | ✅ Real — Gamma + CLOB API |
-| Market volume | ✅ Real |
-| Resolution check | ✅ Real — NWS station observations |
+| NOAA/ICON/JMA forecasts | ✅ Real — NWS API + Open-Meteo |
+| GFS validator forecasts | ✅ Real — Open-Meteo |
+| Polymarket prices & volume | ✅ Real — Gamma + CLOB API |
+| Resolution check | ✅ Real — Polymarket bucket winners |
 | Trade execution | 🟡 Simulated — paper money only |
-| Bankroll | 🟡 Simulated — starts at $2,000 |
+| Bankroll | 🟡 Simulated — $2,000 per strategy |
 | Polymarket fees | ✅ Modeled — 2% on winnings |
 
 ---
 
-## Local setup
+## Strategy Comparison
 
-```bash
-git clone https://github.com/YOUR_USERNAME/weather-arb-bot
-cd weather-arb-bot
-
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-
-pip install -r requirements.txt
-
-cp .env.example .env
-# Edit .env: set DATABASE_URL to your local Postgres
-
-python run.py
-# API at http://localhost:8000
-# Docs at http://localhost:8000/docs
-```
+| Dimension | Strategy B (Sigma) | Strategy A (Forecast Edge) |
+|-----------|-------------------|--------------------------|
+| Edge source | Sigma tail probability | Forecast separation from threshold |
+| Gap requirement | None | ≥4°F / ≥2°C |
+| Uses consensus | Yes (directional agreement) | No |
+| Uses spread gate | Yes | No |
+| Gate count | 12 | 7 |
+| Expected volume | 7-8 trades/day | 2-4 trades/day |
+| Sigma role | Creates edge + sizes position | Sizes position only |
 
 ---
 
-## Railway deploy
-
-### 1. Fork to your GitHub
-
-### 2. Create Railway project
-- railway.app → New Project → Deploy from GitHub
-- Select your fork
-
-### 3. Add Postgres
-- Railway dashboard → your project → Add Plugin → PostgreSQL
-- Copy the `DATABASE_URL` from the plugin
-
-### 4. Set environment variables
-In Railway → your service → Variables:
+## A/B Trading Algorithm
 
 ```
-DATABASE_URL        = (auto-set from Postgres plugin)
-USER_AGENT          = WeatherArbBot/1.0 your@email.com
-STARTING_BANKROLL   = 2000.0
-DRY_RUN             = true
-MIN_EDGE            = 0.08
-MIN_CONFIDENCE      = 0.68
-MIN_EVENT_VOLUME    = 50000
-MIN_BUCKET_VOLUME   = 10000
-```
-
-### 5. Deploy
-Railway auto-builds on push. Watch logs in Railway dashboard.
-
-### 6. Verify it's running
-```
-https://your-app.railway.app/health
-https://your-app.railway.app/api/dashboard
-https://your-app.railway.app/docs
+Every 5 minutes:
+  1. Fetch Polymarket prices (SHARED)
+  2. Fetch primary forecasts — NOAA/ICON/JMA (SHARED)
+  3. Fetch GFS validator forecasts (SHARED)
+  4. Settle open positions for BOTH strategies
+  5. For each city × threshold:
+     — SHARED pre-filters: noon guard, liquidity
+     — Compute forecast analytics (gap, directional agreement)
+     — STRATEGY B (Sigma): Full 12-gate stack with directional consensus
+     — STRATEGY A (Forecast Edge): 7-gate stack, forecast gap ≥4°F/2°C
+     — Each writes trades tagged with strategy, using its own bankroll
+  6. Log everything to Postgres
 ```
 
 ---
@@ -82,76 +60,61 @@ https://your-app.railway.app/docs
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /health` | Health check |
-| `GET /api/dashboard` | All stats, trades, equity curve |
+| `GET /health` | Health check (shows A/B mode) |
+| `GET /api/dashboard?strategy=` | Dashboard data (all / sigma / forecast_edge) |
+| `GET /api/trades?strategy=&status=` | Trade history with strategy filter |
+| `GET /api/stats/by-strategy` | Side-by-side strategy comparison |
+| `GET /api/stats/by-city?strategy=` | Per-city breakdown |
+| `GET /api/stats/by-model?strategy=` | Per-model breakdown |
+| `GET /api/calibration` | Forecast vs actual |
 | `POST /api/scan` | Trigger manual scan |
-| `GET /api/trades?status=OPEN` | Trade history |
-| `GET /api/calibration` | NOAA forecast vs actual |
-| `GET /api/stats/by-city` | Per-city breakdown |
+| `POST /api/admin/reset-bankroll?strategy=` | Reset specific strategy bankroll |
 
 ---
 
-## Metrics tracked
+## Deploy / Migration
 
-**Performance**
-- Total P&L (net of fees)
-- Win rate
-- Average edge %
-- Expected value per trade
-- Profit factor (gross wins / gross losses)
-- Max drawdown %
-- Sharpe ratio
+### First-time A/B setup (existing deployment)
+1. Push `migrate_ab_testing.py` to repo root
+2. In railway.json, temporarily set: `"startCommand": "python migrate_ab_testing.py"`
+3. Deploy — migration adds new columns + Strategy A bankroll row
+4. Restore railway.json to: `"startCommand": "python run.py"`
+5. Push all updated files (config, database, signals, scanner, main, HTMLs)
+6. Deploy — both strategies begin scanning
 
-**Per trade**
-- NOAA forecast vs actual observed temp
-- Forecast error (actual - forecast °F)
-- Polymarket fees deducted
-- Kelly sizing breakdown
-- Entry price + shares
-
-**Calibration**
-- Daily NOAA forecast vs NWS observation for all cities
-- Mean absolute error — tells you if σ=3.5°F assumption is correct
+### Files changed for A/B
+- `backend/config.py` — Added FORECAST_EDGE_CONFIG + STRATEGY_BANKROLL_ID
+- `backend/models/database.py` — New Trade columns, dual bankroll init
+- `backend/core/signals.py` — Fixed consensus + new evaluate_signal_forecast_edge()
+- `backend/core/scanner.py` — Dual strategy execution, fixed dedup
+- `backend/api/main.py` — Strategy filters on all endpoints
+- `weather-arb-dashboard.html` — Strategy tabs + comparison bar
+- `weather-analysis.html` — Strategy filter + gap column
 
 ---
 
-## Trading algorithm
+## Evaluation Plan
 
-```
-Every 5 minutes:
-  1. Fetch Polymarket prices via slug-based discovery (exact event lookup)
-  2. Fetch NOAA/ECMWF primary forecasts for the correct market date per city
-  3. Fetch GFS + ECMWF validator forecasts (multi-model consensus)
-  4. Settle open positions where result is clear
-  5. For each city × threshold (direct bucket matches only):
-     - Liquidity gate (scanner.py, before signal eval):
-         EventVol >= $50k  (event-level Polymarket volume)
-         BucketVol >= $10k (matched bucket volume)
-     - Directional gate: forecast must agree with trade direction
-     - Buffer filter: forecast must clear threshold by ≥4°F / 1.5°C
-     - P(high >= threshold) via Normal(forecast, sigma)
-     - Edge = |NOAA_prob - market_price|
-     - If edge >= 8% AND confidence >= 68%:
-       → Compute Quarter-Kelly size (capped at 2% bankroll)
-       → Paper trade best signal per city
-  6. Log everything to Postgres
-```
+**Target:** 100 settled trades per strategy
+
+**Metrics (ranked):**
+1. Net P&L per trade
+2. Win rate
+3. Total net P&L
+4. Max drawdown
+5. Return on deployed capital
+6. Forecast accuracy (diagnostic)
+
+**Decision framework:**
+- A wins clearly → promote A, retire B
+- B wins on volume → sigma works, keep both
+- Both similar → test Strategy C (backtest from B data)
+- Both losing → pause, recalibrate sigma
 
 ---
 
-## Scaling guide
-
-| Stage | Bankroll | Condition to advance |
-|-------|----------|---------------------|
-| Paper | $2,000 fake | 2 weeks, 30+ trades |
-| Seed | $100 real | Paper win rate > 55%, Sharpe > 1.0 |
-| Grow | $500 real | Seed profitable over 2 weeks |
-| Scale | $2,000 real | Consistent monthly profit |
-
----
-
-## Warnings
-- Paper trading does not guarantee real money results
-- Edge decays as more bots enter the market
-- Polymarket resolution uses specific NWS stations — verify per market
-- Not financial advice — DYOR
+## Key URLs
+- Dashboard: https://web-production-5e27c.up.railway.app/
+- Analysis: https://web-production-5e27c.up.railway.app/analysis
+- API docs: https://web-production-5e27c.up.railway.app/docs
+- Strategy comparison: https://web-production-5e27c.up.railway.app/api/stats/by-strategy
