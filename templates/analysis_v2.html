@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WeatherAlgo v2 — Analysis</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+:root {
+  --bg: #0f1117; --surface: #1a1d27; --surface2: #252830;
+  --border: #2e3140; --text: #e4e4e7; --text2: #9ca3af;
+  --green: #22c55e; --red: #ef4444; --blue: #3b82f6;
+  --yellow: #eab308; --orange: #f97316; --purple: #a855f7;
+  --cyan: #06b6d4;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 14px; }
+a { color: var(--blue); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+
+.header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 12px; }
+.header h1 { font-size: 22px; font-weight: 600; }
+.header h1 span.accent { color: var(--blue); }
+.badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; text-transform: uppercase; }
+.badge-paper { background: rgba(59,130,246,0.2); color: var(--blue); }
+.nav { display: flex; gap: 16px; align-items: center; }
+.nav a { font-size: 13px; color: var(--text2); }
+.nav a.active { color: var(--blue); font-weight: 600; }
+
+.section { margin-bottom: 28px; }
+.section-title { font-size: 16px; font-weight: 600; margin-bottom: 12px; }
+.section-sub { font-size: 12px; color: var(--text2); margin-bottom: 12px; }
+
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+thead th { background: var(--surface2); color: var(--text2); padding: 8px 10px; text-align: left; font-weight: 500; text-transform: uppercase; font-size: 10px; letter-spacing: 0.5px; }
+tbody td { padding: 7px 10px; border-bottom: 1px solid var(--border); }
+tbody tr:hover { background: var(--surface2); }
+.table-wrap { overflow-x: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+.pnl-pos { color: var(--green); }
+.pnl-neg { color: var(--red); }
+
+.chart-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+@media (max-width: 900px) { .chart-grid { grid-template-columns: 1fr; } }
+.chart-box { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+.chart-box canvas { max-height: 320px; }
+.chart-title { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+.chart-sub { font-size: 11px; color: var(--text2); margin-bottom: 10px; }
+
+.fill-bar { display: flex; height: 20px; border-radius: 4px; overflow: hidden; margin-bottom: 6px; }
+.fill-bar div { display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 600; min-width: 20px; }
+
+.pkg-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin-bottom: 10px; }
+.pkg-header { display: flex; justify-content: space-between; font-size: 13px; font-weight: 600; margin-bottom: 8px; }
+.pkg-legs { font-size: 12px; color: var(--text2); }
+.pkg-legs span { margin-right: 12px; }
+
+.strat-spectrum { color: var(--blue); }
+.strat-sniper_yes { color: var(--green); }
+.strat-sniper_no { color: var(--red); }
+.strat-ladder_3 { color: var(--purple); }
+.strat-ladder_5 { color: var(--cyan); }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <div><h1>WeatherAlgo <span class="accent">v2</span> — Analysis <span class="badge badge-paper">Paper</span></h1></div>
+    <div class="nav">
+      <a href="/">Dashboard</a>
+      <a href="/analysis" class="active">Analysis</a>
+    </div>
+  </div>
+
+  <!-- Strategy Comparison Table -->
+  <div class="section">
+    <div class="section-title">Strategy Comparison</div>
+    <div class="section-sub">Non-ladder: PnL/trade → win rate → total PnL → max drawdown → ROC. Ladder: PnL/package → package win rate → total PnL → ROC.</div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>Strategy</th><th>Type</th><th>Settled</th><th>Open</th>
+          <th>Win Rate</th><th>PnL/Unit</th><th>Total PnL</th>
+          <th>Max DD</th><th>ROC</th><th>Kill Status</th>
+        </tr></thead>
+        <tbody id="compBody"><tr><td colspan="10" style="text-align:center;color:var(--text2)">Loading...</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Charts -->
+  <div class="chart-grid">
+    <div class="chart-box">
+      <div class="chart-title">Traded-Side Fair Value vs Market Ask</div>
+      <div class="chart-sub">YES: x = ensemble_prob, y = yes_ask. NO: x = 1−ensemble_prob, y = no_ask. Points above the line = market overpriced (edge for us).</div>
+      <canvas id="scatterChart"></canvas>
+    </div>
+    <div class="chart-box">
+      <div class="chart-title">Fill Quality by Strategy</div>
+      <div id="fillQuality" style="padding-top:8px">Loading...</div>
+    </div>
+  </div>
+
+  <!-- By-City Performance -->
+  <div class="section">
+    <div class="section-title">Performance by City</div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>City</th><th>Trades</th><th>Wins</th><th>Win Rate</th><th>Total PnL</th></tr></thead>
+        <tbody id="cityBody"><tr><td colspan="5" style="text-align:center;color:var(--text2)">Loading...</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Ladder Packages -->
+  <div class="section">
+    <div class="section-title">Ladder Packages</div>
+    <div id="ladderPkgs">Loading...</div>
+  </div>
+</div>
+
+<script>
+const SC = { spectrum:'#3b82f6', sniper_yes:'#22c55e', sniper_no:'#ef4444', ladder_3:'#a855f7', ladder_5:'#06b6d4' };
+const SL = { spectrum:'Spectrum', sniper_yes:'Sniper YES', sniper_no:'Sniper NO', ladder_3:'Ladder 3', ladder_5:'Ladder 5' };
+
+function pc(v){return v>0?'pnl-pos':v<0?'pnl-neg':'';}
+function fmt$(v){return v==null?'—':'$'+v.toFixed(2);}
+function fP(v){return v==null?'—':v.toFixed(1)+'%';}
+
+let scChart=null;
+
+async function load(){
+  try{
+    const [statsR,compR]=await Promise.all([fetch('/api/v2/stats'),fetch('/api/v2/comparison')]);
+    const stats=await statsR.json(), comp=await compR.json();
+    renderComp(stats);
+    renderScatter(comp.scatter||[]);
+    renderFill(stats);
+    renderCity(comp.city_stats||[]);
+    renderPkgs(comp.ladder_packages||[]);
+  }catch(e){console.error('Analysis load:',e);}
+}
+
+function renderComp(stats){
+  const rows=Object.entries(stats).map(([s,d])=>{
+    const p=d.performance, il=d.is_ladder, k=d.kill_triggered;
+    const type=il?'Package':'Trade';
+    const settled=il?(p.settled_packages??0):(p.settled_trades??0);
+    const open=il?(p.open_packages??0):(p.open_positions??0);
+    const wr=il?(p.package_win_rate??0):(p.win_rate??0);
+    const ppu=il?(p.pnl_per_package??0):(p.pnl_per_trade??0);
+    const tp=p.total_pnl??0;
+    const dd=p.max_drawdown_pct??0;
+    const roc=p.return_on_capital??0;
+    const kHtml=k?`<span style="color:var(--red)">⚠ ${d.kill_flags.length}</span>`:'<span style="color:var(--green)">✓</span>';
+    return`<tr>
+      <td class="strat-${s}" style="font-weight:600">${SL[s]||s}</td>
+      <td>${type}</td><td>${settled}</td><td>${open}</td>
+      <td>${fP(wr)}</td><td class="${pc(ppu)}">${fmt$(ppu)}</td>
+      <td class="${pc(tp)}">${fmt$(tp)}</td><td>${fP(dd)}</td>
+      <td class="${pc(roc)}">${fP(roc)}</td><td>${kHtml}</td></tr>`;
+  });
+  document.getElementById('compBody').innerHTML=rows.join('');
+}
+
+function renderScatter(data){
+  const ctx=document.getElementById('scatterChart').getContext('2d');
+  if(scChart)scChart.destroy();
+  if(!data.length){
+    ctx.font='14px sans-serif';ctx.fillStyle='#9ca3af';ctx.textAlign='center';
+    ctx.fillText('No data yet',ctx.canvas.width/2,ctx.canvas.height/2);return;
+  }
+
+  // Split by direction AND status for distinct visual encoding
+  const yesWin=data.filter(d=>d.direction==='YES'&&d.status==='WIN');
+  const yesLoss=data.filter(d=>d.direction==='YES'&&d.status==='LOSS');
+  const noWin=data.filter(d=>d.direction==='NO'&&d.status==='WIN');
+  const noLoss=data.filter(d=>d.direction==='NO'&&d.status==='LOSS');
+
+  scChart=new Chart(ctx,{type:'scatter',data:{datasets:[
+    {label:'YES WIN',data:yesWin.map(d=>({x:d.traded_prob,y:d.traded_ask})),
+     backgroundColor:'rgba(34,197,94,0.7)',borderColor:'#22c55e',pointRadius:5,pointStyle:'circle'},
+    {label:'YES LOSS',data:yesLoss.map(d=>({x:d.traded_prob,y:d.traded_ask})),
+     backgroundColor:'rgba(239,68,68,0.7)',borderColor:'#ef4444',pointRadius:5,pointStyle:'circle'},
+    {label:'NO WIN',data:noWin.map(d=>({x:d.traded_prob,y:d.traded_ask})),
+     backgroundColor:'rgba(34,197,94,0.7)',borderColor:'#22c55e',pointRadius:6,pointStyle:'triangle'},
+    {label:'NO LOSS',data:noLoss.map(d=>({x:d.traded_prob,y:d.traded_ask})),
+     backgroundColor:'rgba(239,68,68,0.7)',borderColor:'#ef4444',pointRadius:6,pointStyle:'triangle'},
+    {label:'Fair Value (y=x)',type:'line',data:[{x:0,y:0},{x:1,y:1}],
+     borderColor:'rgba(255,255,255,0.25)',borderDash:[5,5],borderWidth:1,pointRadius:0,fill:false}
+  ]},options:{responsive:true,maintainAspectRatio:false,plugins:{
+    legend:{labels:{color:'#9ca3af',usePointStyle:true}},
+    tooltip:{callbacks:{label:function(ctx){
+      const dsLabel=ctx.dataset.label;
+      if(dsLabel==='Fair Value (y=x)')return'';
+      const isYes=dsLabel.startsWith('YES');
+      const isWin=dsLabel.includes('WIN');
+      const arr=isYes?(isWin?yesWin:yesLoss):(isWin?noWin:noLoss);
+      const d=arr[ctx.dataIndex];
+      if(!d)return'';
+      return`${d.city} ${d.bucket_label} ${d.direction} (${d.strategy}) Edge=${d.edge_pct}%`;
+    }}}
+  },scales:{
+    x:{title:{display:true,text:'Traded-Side Probability (ensemble)',color:'#9ca3af'},grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:'#9ca3af'},min:0,max:1},
+    y:{title:{display:true,text:'Traded-Side Market Ask',color:'#9ca3af'},grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:'#9ca3af'},min:0,max:1}
+  }}});
+}
+
+function renderFill(stats){
+  const strats=Object.keys(stats);
+  let html='';
+  strats.forEach(s=>{
+    const fq=stats[s].fill_quality||{};
+    const total=Object.values(fq).reduce((a,b)=>a+b,0);
+    const color=SC[s]||'#fff';
+    if(!total){
+      html+=`<div style="margin-bottom:12px"><div style="font-size:13px;font-weight:500;color:${color};margin-bottom:4px">${SL[s]}</div><div style="font-size:12px;color:var(--text2)">No trades</div></div>`;
+      return;
+    }
+    const p=k=>((fq[k]||0)/total*100);
+    html+=`<div style="margin-bottom:14px">
+      <div style="font-size:13px;font-weight:500;color:${color};margin-bottom:4px">${SL[s]} <span style="color:var(--text2);font-weight:400">(${total})</span></div>
+      <div class="fill-bar">
+        ${fq.full?`<div style="width:${p('full')}%;background:var(--green);color:#000">${fq.full}</div>`:''}
+        ${fq.shallow?`<div style="width:${p('shallow')}%;background:var(--yellow);color:#000">${fq.shallow}</div>`:''}
+        ${fq.stale?`<div style="width:${p('stale')}%;background:var(--orange);color:#000">${fq.stale}</div>`:''}
+        ${fq.unknown?`<div style="width:${p('unknown')}%;background:var(--surface2);color:var(--text2)">${fq.unknown}</div>`:''}
+      </div>
+      <div style="font-size:11px;color:var(--text2)">
+        <span style="color:var(--green)">● Full ${fq.full||0}</span>&nbsp;
+        <span style="color:var(--yellow)">● Shallow ${fq.shallow||0}</span>&nbsp;
+        <span style="color:var(--orange)">● Stale ${fq.stale||0}</span>&nbsp;
+        <span>● Unk ${fq.unknown||0}</span>
+      </div></div>`;
+  });
+  document.getElementById('fillQuality').innerHTML=html||'<div style="color:var(--text2)">No data</div>';
+}
+
+function renderCity(cities){
+  if(!cities.length){document.getElementById('cityBody').innerHTML='<tr><td colspan="5" style="text-align:center;color:var(--text2)">No data</td></tr>';return;}
+  cities.sort((a,b)=>b.pnl-a.pnl);
+  document.getElementById('cityBody').innerHTML=cities.map(c=>`<tr>
+    <td style="font-weight:500">${c.city}</td><td>${c.trades}</td><td>${c.wins}</td>
+    <td>${fP(c.win_rate)}</td><td class="${pc(c.pnl)}">${fmt$(c.pnl)}</td></tr>`).join('');
+}
+
+function renderPkgs(pkgs){
+  if(!pkgs.length){document.getElementById('ladderPkgs').innerHTML='<div style="color:var(--text2);padding:20px;text-align:center">No ladder packages</div>';return;}
+  document.getElementById('ladderPkgs').innerHTML=pkgs.map(pkg=>{
+    const sc=SC[pkg.strategy]||'#fff';
+    const pC=pkg.total_pnl>0?'pnl-pos':pkg.total_pnl<0?'pnl-neg':'';
+    const won=pkg.won?'<span style="color:var(--green)">WIN</span>':(pkg.all_settled?'<span style="color:var(--red)">LOSS</span>':'<span style="color:var(--yellow)">OPEN</span>');
+    const legs=(pkg.legs||[]).map(l=>
+      `<span>${l.bucket_label} ${l.direction} @${l.entry_price?l.entry_price.toFixed(3):'?'} → <span style="color:${l.status==='WIN'?'var(--green)':l.status==='LOSS'?'var(--red)':'var(--text2)'};font-weight:600">${l.status}</span>${l.net_pnl!=null?' ('+fmt$(l.net_pnl)+')':''}</span>`
+    ).join('');
+    return`<div class="pkg-card" style="border-left:3px solid ${sc}">
+      <div class="pkg-header"><div>${SL[pkg.strategy]} — ${pkg.city} ${pkg.market_date||''}</div><div>${won} <span class="${pC}" style="margin-left:8px">${fmt$(pkg.total_pnl)}</span></div></div>
+      <div style="font-size:12px;color:var(--text2);margin-bottom:6px">Cost: ${fmt$(pkg.package_cost)} | Prob: ${pkg.package_prob?(pkg.package_prob*100).toFixed(1)+'%':'—'} | Edge: ${pkg.package_edge?(pkg.package_edge*100).toFixed(1)+'%':'—'} | Legs: ${pkg.num_legs||pkg.legs?.length||'?'}</div>
+      <div class="pkg-legs">${legs}</div></div>`;
+  }).join('');
+}
+
+load();
+</script>
+</body>
+</html>

@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WeatherAlgo v2 — Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+:root {
+  --bg: #0f1117; --surface: #1a1d27; --surface2: #252830;
+  --border: #2e3140; --text: #e4e4e7; --text2: #9ca3af;
+  --green: #22c55e; --red: #ef4444; --blue: #3b82f6;
+  --yellow: #eab308; --orange: #f97316; --purple: #a855f7;
+  --cyan: #06b6d4;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 14px; }
+a { color: var(--blue); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+
+.header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 12px; }
+.header h1 { font-size: 22px; font-weight: 600; }
+.header h1 span.accent { color: var(--blue); }
+.badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; text-transform: uppercase; }
+.badge-paper { background: rgba(59,130,246,0.2); color: var(--blue); }
+.badge-kill { background: rgba(239,68,68,0.2); color: var(--red); }
+.badge-ok { background: rgba(34,197,94,0.15); color: var(--green); }
+.nav { display: flex; gap: 16px; align-items: center; }
+.nav a { font-size: 13px; color: var(--text2); }
+.nav a.active { color: var(--blue); font-weight: 600; }
+.refresh-info { font-size: 11px; color: var(--text2); }
+
+.summary-bar { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 24px; }
+.summary-item { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+.summary-item .label { font-size: 11px; color: var(--text2); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+.summary-item .value { font-size: 22px; font-weight: 700; }
+.summary-item .sub { font-size: 12px; color: var(--text2); margin-top: 2px; }
+
+.strat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px; margin-bottom: 24px; }
+.strat-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+.strat-card.kill-active { border-color: var(--red); }
+.strat-card .strat-name { font-size: 14px; font-weight: 600; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
+.strat-row { display: flex; justify-content: space-between; padding: 3px 0; font-size: 13px; }
+.strat-row .lbl { color: var(--text2); }
+.strat-row .val { font-weight: 500; }
+.kill-banner { margin-top: 8px; padding: 6px 10px; background: rgba(239,68,68,0.1); border-radius: 6px; font-size: 11px; color: var(--red); }
+
+.section { margin-bottom: 24px; }
+.section-title { font-size: 16px; font-weight: 600; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+.section-title .count { font-size: 12px; color: var(--text2); font-weight: 400; }
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+thead th { background: var(--surface2); color: var(--text2); padding: 8px 10px; text-align: left; font-weight: 500; text-transform: uppercase; font-size: 10px; letter-spacing: 0.5px; position: sticky; top: 0; }
+tbody td { padding: 7px 10px; border-bottom: 1px solid var(--border); }
+tbody tr:hover { background: var(--surface2); }
+.table-wrap { overflow-x: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+.pnl-pos { color: var(--green); }
+.pnl-neg { color: var(--red); }
+.status-win { color: var(--green); font-weight: 600; }
+.status-loss { color: var(--red); font-weight: 600; }
+.status-open { color: var(--yellow); font-weight: 600; }
+.fill-full { color: var(--green); }
+.fill-shallow { color: var(--yellow); }
+.fill-stale { color: var(--orange); }
+.chart-container { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 24px; }
+.chart-container canvas { max-height: 250px; }
+
+.strat-spectrum { border-left: 3px solid var(--blue); }
+.strat-sniper_yes { border-left: 3px solid var(--green); }
+.strat-sniper_no { border-left: 3px solid var(--red); }
+.strat-ladder_3 { border-left: 3px solid var(--purple); }
+.strat-ladder_5 { border-left: 3px solid var(--cyan); }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <div><h1>WeatherAlgo <span class="accent">v2</span> <span class="badge badge-paper">Paper Trading</span></h1></div>
+    <div class="nav">
+      <a href="/" class="active">Dashboard</a>
+      <a href="/analysis">Analysis</a>
+      <span class="refresh-info" id="refreshInfo">Loading...</span>
+    </div>
+  </div>
+
+  <div class="summary-bar" id="summaryBar"><div class="summary-item"><div class="label">Loading...</div></div></div>
+  <div class="strat-grid" id="stratGrid"></div>
+
+  <div class="chart-container">
+    <div class="section-title">Equity Curve (Combined)</div>
+    <canvas id="equityChart"></canvas>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Open Positions <span class="count" id="openCount"></span></div>
+    <div class="table-wrap">
+      <table><thead><tr><th>Strategy</th><th>City</th><th>Date</th><th>Bucket</th><th>Side</th><th>Edge</th><th>Entry</th><th>Size</th><th>Fill</th><th>Agreement</th></tr></thead>
+      <tbody id="openBody"><tr><td colspan="10" style="text-align:center;color:var(--text2)">Loading...</td></tr></tbody></table>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Recent Settled Trades <span class="count" id="settledCount"></span></div>
+    <div class="table-wrap">
+      <table><thead><tr><th>Strategy</th><th>City</th><th>Date</th><th>Bucket</th><th>Side</th><th>Edge</th><th>Entry</th><th>Result</th><th>Net P&L</th><th>Resolved</th></tr></thead>
+      <tbody id="settledBody"><tr><td colspan="10" style="text-align:center;color:var(--text2)">Loading...</td></tr></tbody></table>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Recent Scan Logs <span class="count" id="scanCount"></span></div>
+    <div class="table-wrap">
+      <table><thead><tr><th>Time</th><th>Cities</th><th>Signals</th><th>Opened</th><th>Settled</th><th>Bankroll</th><th>Duration</th><th>Errors</th></tr></thead>
+      <tbody id="scanBody"><tr><td colspan="8" style="text-align:center;color:var(--text2)">Loading...</td></tr></tbody></table>
+    </div>
+  </div>
+</div>
+
+<script>
+const SC = { spectrum:'#3b82f6', sniper_yes:'#22c55e', sniper_no:'#ef4444', ladder_3:'#a855f7', ladder_5:'#06b6d4' };
+const SL = { spectrum:'Spectrum', sniper_yes:'Sniper YES', sniper_no:'Sniper NO', ladder_3:'Ladder 3', ladder_5:'Ladder 5' };
+
+function pc(v){return v>0?'pnl-pos':v<0?'pnl-neg':'';}
+function sc(s){return s==='WIN'?'status-win':s==='LOSS'?'status-loss':'status-open';}
+function fc(f){return f==='full'?'fill-full':f==='shallow'?'fill-shallow':f==='stale'?'fill-stale':'';}
+function fmt$(v){return v==null?'—':'$'+v.toFixed(2);}
+function fP(v){return v==null?'—':v.toFixed(1)+'%';}
+function sT(iso){if(!iso)return'—';const d=new Date(iso);return d.toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});}
+
+let eqChart=null;
+
+async function load(){
+  try{
+    const [statsR,tradesR,dashR]=await Promise.all([
+      fetch('/api/v2/stats'),fetch('/api/v2/trades?limit=200'),fetch('/api/v2/dashboard')
+    ]);
+    const stats=await statsR.json(), trades=await tradesR.json(), dash=await dashR.json();
+    renderSummary(stats);
+    renderCards(stats);
+    renderOpen(trades.filter(t=>t.status==='OPEN'));
+    renderSettled(trades.filter(t=>t.status==='WIN'||t.status==='LOSS'));
+    renderEquity(dash);
+    renderScans(dash.scan_logs||[]);
+    document.getElementById('refreshInfo').textContent='Updated '+new Date().toLocaleTimeString();
+  }catch(e){
+    console.error('Load error:',e);
+    document.getElementById('refreshInfo').textContent='Error loading';
+  }
+}
+
+function renderSummary(stats){
+  const ss=Object.keys(stats);
+  let tb=0,tp=0,ts=0,to=0,kc=0;
+  ss.forEach(s=>{
+    tb+=stats[s].bankroll.current; tp+=stats[s].bankroll.pnl;
+    const p=stats[s].performance;
+    if(stats[s].is_ladder){ts+=p.settled_packages||0;to+=p.open_packages||0;}
+    else{ts+=p.settled_trades||0;to+=p.open_positions||0;}
+    if(stats[s].kill_triggered)kc++;
+  });
+  const st=ss.reduce((a,s)=>a+stats[s].bankroll.starting,0);
+  const roc=st>0?((tb-st)/st*100):0;
+  document.getElementById('summaryBar').innerHTML=`
+    <div class="summary-item"><div class="label">Total Bankroll</div><div class="value">${fmt$(tb)}</div><div class="sub">Started ${fmt$(st)}</div></div>
+    <div class="summary-item"><div class="label">Total P&L</div><div class="value ${pc(tp)}">${tp>=0?'+':''}${fmt$(tp)}</div><div class="sub">ROC ${roc>=0?'+':''}${roc.toFixed(1)}%</div></div>
+    <div class="summary-item"><div class="label">Settled</div><div class="value">${ts}</div><div class="sub">${to} open</div></div>
+    <div class="summary-item"><div class="label">Strategies</div><div class="value">${ss.length-kc}/${ss.length}</div><div class="sub">${kc>0?kc+' kill flag(s)':'All healthy'}</div></div>
+    <div class="summary-item"><div class="label">Mode</div><div class="value" style="font-size:16px">Paper</div><div class="sub">DRY_RUN = true</div></div>`;
+}
+
+function renderCards(stats){
+  const html=Object.entries(stats).map(([s,d])=>{
+    const p=d.performance, b=d.bankroll, k=d.kill_triggered, il=d.is_ladder;
+    const wr=il?(p.package_win_rate??0):(p.win_rate??0);
+    const ppu=il?p.pnl_per_package:p.pnl_per_trade;
+    const settled=il?`${p.settled_packages||0} pkg / ${p.open_packages||0} open`:`${p.settled_trades||0} / ${p.open_positions||0} open`;
+    const dd=p.max_drawdown_pct??0;
+    return`
+    <div class="strat-card strat-${s} ${k?'kill-active':''}">
+      <div class="strat-name"><span>${SL[s]||s}</span>${k?'<span class="badge badge-kill">KILL</span>':'<span class="badge badge-ok">OK</span>'}</div>
+      <div class="strat-row"><span class="lbl">Bankroll</span><span class="val">${fmt$(b.current)}</span></div>
+      <div class="strat-row"><span class="lbl">P&L</span><span class="val ${pc(b.pnl)}">${b.pnl>=0?'+':''}${fmt$(b.pnl)}</span></div>
+      <div class="strat-row"><span class="lbl">${il?'Pkg Win Rate':'Win Rate'}</span><span class="val">${fP(wr)}</span></div>
+      <div class="strat-row"><span class="lbl">PnL/${il?'Pkg':'Trade'}</span><span class="val ${pc(ppu)}">${fmt$(ppu)}</span></div>
+      <div class="strat-row"><span class="lbl">Settled</span><span class="val">${settled}</span></div>
+      <div class="strat-row"><span class="lbl">Daily Loss</span><span class="val">${fmt$(b.daily_loss)} / ${fmt$(b.daily_loss_cap)}</span></div>
+      <div class="strat-row"><span class="lbl">Max Drawdown</span><span class="val">${fP(dd)}</span></div>
+      ${k?'<div class="kill-banner">'+d.kill_flags.join('<br>')+'</div>':''}
+    </div>`;
+  }).join('');
+  document.getElementById('stratGrid').innerHTML=html;
+}
+
+function renderOpen(trades){
+  document.getElementById('openCount').textContent=`(${trades.length})`;
+  if(!trades.length){document.getElementById('openBody').innerHTML='<tr><td colspan="10" style="text-align:center;color:var(--text2)">No open positions</td></tr>';return;}
+  document.getElementById('openBody').innerHTML=trades.map(t=>`<tr>
+    <td style="color:${SC[t.strategy]||'#fff'}">${SL[t.strategy]||t.strategy}</td>
+    <td>${t.city}</td><td>${t.market_date||'—'}</td><td>${t.bucket_label||'—'}</td><td>${t.direction}</td>
+    <td>${fP(t.edge_pct)}</td><td>${t.entry_price?t.entry_price.toFixed(3):'—'}</td>
+    <td>${fmt$(t.position_size_usd)}</td><td class="${fc(t.fill_quality)}">${t.fill_quality||'—'}</td>
+    <td>${t.model_agreement?'✓':'✗'}</td></tr>`).join('');
+}
+
+function renderSettled(trades){
+  const r=trades.slice(0,50);
+  document.getElementById('settledCount').textContent=`(${trades.length} total, showing ${r.length})`;
+  if(!r.length){document.getElementById('settledBody').innerHTML='<tr><td colspan="10" style="text-align:center;color:var(--text2)">No settled trades</td></tr>';return;}
+  document.getElementById('settledBody').innerHTML=r.map(t=>`<tr>
+    <td style="color:${SC[t.strategy]||'#fff'}">${SL[t.strategy]||t.strategy}</td>
+    <td>${t.city}</td><td>${t.market_date||'—'}</td><td>${t.bucket_label||'—'}</td><td>${t.direction}</td>
+    <td>${fP(t.edge_pct)}</td><td>${t.entry_price?t.entry_price.toFixed(3):'—'}</td>
+    <td class="${sc(t.status)}">${t.status}</td>
+    <td class="${pc(t.net_pnl)}">${t.net_pnl!=null?(t.net_pnl>=0?'+':'')+fmt$(t.net_pnl):'—'}</td>
+    <td>${sT(t.resolved_at)}</td></tr>`).join('');
+}
+
+function renderEquity(dash){
+  const eq=dash.equity_curve||[];
+  if(eq.length<2)return;
+  const ctx=document.getElementById('equityChart').getContext('2d');
+  if(eqChart)eqChart.destroy();
+  eqChart=new Chart(ctx,{type:'line',data:{
+    labels:eq.map((_,i)=>i===0?'Start':'#'+i),
+    datasets:[{data:eq,borderColor:'#3b82f6',backgroundColor:'rgba(59,130,246,0.08)',fill:true,tension:0.3,pointRadius:0,borderWidth:2}]
+  },options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},
+    scales:{x:{display:false},y:{grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:'#9ca3af',callback:v=>'$'+v}}}}});
+}
+
+function renderScans(logs){
+  document.getElementById('scanCount').textContent=`(${logs.length})`;
+  if(!logs.length){document.getElementById('scanBody').innerHTML='<tr><td colspan="8" style="text-align:center;color:var(--text2)">No scan logs</td></tr>';return;}
+  document.getElementById('scanBody').innerHTML=logs.map(s=>`<tr>
+    <td>${sT(s.scanned_at)}</td><td>${s.cities_scanned}</td><td>${s.signals_found}</td>
+    <td>${s.trades_opened}</td><td>${s.trades_settled}</td><td>${fmt$(s.bankroll_snapshot)}</td>
+    <td>${s.duration_ms?(s.duration_ms/1000).toFixed(1)+'s':'—'}</td>
+    <td style="color:${s.errors?'var(--red)':'var(--text2)'};max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${s.errors||'None'}</td></tr>`).join('');
+}
+
+load();
+setInterval(load,60000);
+</script>
+</body>
+</html>
