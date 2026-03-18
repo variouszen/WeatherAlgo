@@ -43,7 +43,9 @@ async def _fetch_no_quote_context(token_id: str, venue_adapter) -> dict:
     result = {"ask": 0.0, "bid": 0.0, "spread": 0.0, "midpoint": 0.0, "depth": 0.0}
 
     try:
-        result["ask"] = await venue_adapter.get_ask_price(token_id)
+        ask = await venue_adapter.get_ask_price(token_id)
+        if ask is not None:
+            result["ask"] = ask
     except Exception:
         pass
 
@@ -296,7 +298,7 @@ async def evaluate_sniper_no(
         except Exception:
             continue  # Cannot price NO token → skip
 
-        if no_ask <= 0:
+        if no_ask is None or no_ask <= 0:
             continue
 
         # Gate 2: NO ask price <= 0.55 (actual NO ask, not approximation)
