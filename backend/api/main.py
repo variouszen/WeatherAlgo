@@ -622,6 +622,7 @@ async def full_reset_endpoint(confirm: str = ""):
                 bs = await get_bankroll(session, strat)
                 starting = V2_CONFIGS[strat].get("starting_bankroll", 500.0)
                 bs.balance = starting
+                bs.starting_balance = starting
                 bs.daily_loss_today = 0.0
                 bs.last_reset_date = datetime.now(timezone.utc).date().isoformat()
 
