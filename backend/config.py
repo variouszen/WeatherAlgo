@@ -1,4 +1,6 @@
-# backend/config.py
+# config.py — WeatherAlgo v2
+from __future__ import annotations
+
 import os
 from dotenv import load_dotenv
 
@@ -14,180 +16,150 @@ elif DATABASE_URL.startswith("postgresql://") and "+asyncpg" not in DATABASE_URL
 # ── Bot identity ──────────────────────────────────────────────────────────────
 USER_AGENT = os.getenv("USER_AGENT", "WeatherArbBot/1.0 contact@example.com")
 
-# ── Paper trading config ──────────────────────────────────────────────────────
-STARTING_BANKROLL = float(os.getenv("STARTING_BANKROLL", "2000.0"))
+# ── Paper trading ────────────────────────────────────────────────────────────
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 
-# ── Strategy B: Sigma (existing bot logic) ────────────────────────────────────
-BOT_CONFIG = {
-    # --- Core filters (HARD — no override) ---
-    "min_edge": float(os.getenv("MIN_EDGE", "0.08")),
-    "min_confidence": float(os.getenv("MIN_CONFIDENCE", "0.68")),
-    "min_event_volume":  float(os.getenv("MIN_EVENT_VOLUME",  "5000")),
-    "min_bucket_volume": float(os.getenv("MIN_BUCKET_VOLUME", "500")),
+# ── Ensemble config ──────────────────────────────────────────────────────────
+ENSEMBLE_MODELS = os.getenv("ENSEMBLE_MODELS", "gfs_seamless,ecmwf_ifs025")
+SCAN_SYNC_GFS_RUNS = os.getenv("SCAN_SYNC_GFS_RUNS", "true").lower() == "true"
 
-    # --- Directional gate (HARD — no override) ---
-    "require_directional_gate": True,
+# ── Scan timing ──────────────────────────────────────────────────────────────
+SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "300"))
+MAX_FORECAST_DAYS = 2  # day+0 and day+1 only (day+2 removed per spec)
 
-    # --- Multi-model consensus (FIXED: now uses directional agreement) ---
-    # Both models must be on the same side of threshold as bet direction.
-    # If not → hard block (trade doesn't enter).
-    # If yes but spread is large → half sizing via spread gate.
-    "consensus_full_size_models": 2,
-    "consensus_reduced_size_models": 1,
-    "consensus_reduced_factor": 0.5,
-    "max_model_spread_f": 6.0,
-    "max_model_spread_c": 3.0,
 
-    # --- Crowd conviction filters ---
-    "max_yes_price_for_no": 0.80,
-    "max_yes_price": 0.42,
-    "min_no_price": 0.58,
+# ══════════════════════════════════════════════════════════════════════════════
+# V2 STRATEGY CONFIGS — Locked per Master Spec Sections 3A-3E
+# ══════════════════════════════════════════════════════════════════════════════
 
-    # --- Early market window (timing modifier — not a gate) ---
-    "early_window_hours": 6,
-    "early_window_confidence_boost": 0.08,
-    "early_window_kelly_boost": 1.25,
+# ── Spectrum — Native Bucket Benchmark ($500) ────────────────────────────────
+# YES + NO combined; picks best edge per bucket; $2.00 sizing;
+# one trade per city-date; 10 cities only.
+SPECTRUM_V2_CONFIG = {
+    # Gate thresholds
+    "min_edge": 0.08,              # Gate 1: 8% minimum edge
+    "min_ensemble_prob": 0.05,     # Gate 2: 5% minimum (both sides)
+    "max_ask": 0.50,               # Gate 3: 50¢ max ask
+    "max_peak_distance": 4,        # Gate 4: YES only, ±4 buckets from peak
+    # Sizing
+    "trade_size": 2.00,            # Fixed $2.00 per trade
+    # Bankroll
+    "bankroll_id": 3,
+    "starting_bankroll": 500.0,
+    # Risk limits (Spec Section 8)
+    "max_open_per_city_date": 1,
+    "max_open_total": 20,
+    "max_daily_loss": 20.0,
+    "max_single_city_exposure": 10.0,
+}
 
-    # --- Re-entry system ---
-    "reentry_enabled": True,
-    "reentry_min_edge_premium": 0.04,
-    "reentry_min_crowd_move": 0.08,
-    "reentry_min_edge_improvement": 0.03,
-    "reentry_cooldown_minutes": 45,
-    "reentry_max_per_city": 2,
-    "reentry_edge_hwm_cap": 0.85,
-    "reentry_no_late_entry_hours": 3,
+# ── Sniper YES — High-Conviction Cheap Buckets ($500) ────────────────────────
+SNIPER_YES_CONFIG = {
+    # Gate thresholds
+    "min_edge": 0.10,              # Gate 1: 10% minimum edge
+    "min_edge_ratio": 2.0,         # Gate 2: ensemble_prob >= 2x market_ask
+    "max_ask": 0.15,               # Gate 3: 15¢ max ask
+    "min_ensemble_prob": 0.08,     # Gate 4: 8% minimum
+    "max_peak_distance": 3,        # Gate 5: ±3 buckets from peak
+    "max_spread": 0.05,            # Gate 7: 5¢ max spread
+    # Sizing
+    "trade_size": 1.00,            # Fixed $1.00 per trade
+    # Bankroll
+    "bankroll_id": 4,
+    "starting_bankroll": 500.0,
+    # Risk limits
+    "max_open_per_city_date": 1,
+    "max_open_total": 20,
+    "max_daily_loss": 10.0,
+    "max_single_city_exposure": 5.0,
+}
 
-    # --- Position sizing ---
-    "kelly_fraction": 0.25,
-    "max_position_pct": 0.02,
-    "min_position_usd": 10.0,
-    "max_open_per_city": 1,
-    "max_correlated_yes": 3,
+# ── Sniper NO — High-Conviction Overpriced Buckets ($500) ────────────────────
+SNIPER_NO_CONFIG = {
+    # Gate thresholds
+    "max_ensemble_prob": 0.03,     # Gate 1: model says <3% chance
+    "max_no_ask": 0.55,            # Gate 2: NO ask ≤ 55¢ (LOCKED — do not tighten)
+    "min_edge": 0.10,              # Gate 3: 10% edge on NO side
+    "max_model_prob": 0.05,        # Gate 4: both models <5%
+    "max_spread": 0.05,            # Gate 5: 5¢ max spread
+    # Sizing
+    "trade_size": 1.00,            # Fixed $1.00 per trade
+    # Bankroll
+    "bankroll_id": 5,
+    "starting_bankroll": 500.0,
+    # Risk limits
+    "max_open_per_city_date": 1,
+    "max_open_total": 20,
+    "max_daily_loss": 10.0,
+    "max_single_city_exposure": 5.0,
+}
 
-    # --- Multi-day city caps ---
-    "max_positions_per_city": 3,
-    "max_city_exposure_pct": 0.06,
+# ── Ladder 3 — Tight Package ($500) ─────────────────────────────────────────
+LADDER_3_CONFIG = {
+    "width": 3,
+    # Gate thresholds
+    "min_package_edge": 0.15,      # Gate 1: 15% return on capital
+    "min_package_prob": 0.60,      # Gate 2: 60% package probability
+    "max_package_cost": 10.00,     # Gate 3: $10 max package cost
+    "shares_per_bucket": 10,       # 10 shares per leg
+    # Bankroll
+    "bankroll_id": 6,
+    "starting_bankroll": 500.0,
+    # Risk limits
+    "max_open_per_city_date": 1,
+    "max_open_total": 10,
+    "max_daily_loss": 30.0,
+    "max_single_city_exposure": 20.0,
+}
 
-    # --- Circuit breakers ---
-    # For paper A/B testing: set very high to avoid throttling data collection.
-    # daily_loss_cap_pct effectively disabled at 100%.
-    "daily_loss_cap_pct": 1.00,       # 100% = effectively no cap for paper testing
-    "daily_loss_cap_floor_usd": 50.0, # floor for when we re-enable
-    "bankroll_floor": 0.0,            # allow strategies to hit zero — that IS the data
-
-    # --- Fees ---
-    "polymarket_fee_pct": 0.02,
-
-    # --- Forecast ---
-    "max_forecast_days": 2,
-    "scan_interval_seconds": 300,
+# ── Ladder 5 — Wide Package ($500) ──────────────────────────────────────────
+LADDER_5_CONFIG = {
+    "width": 5,
+    # Gate thresholds (same as Ladder 3)
+    "min_package_edge": 0.15,
+    "min_package_prob": 0.60,
+    "max_package_cost": 10.00,
+    "shares_per_bucket": 10,
+    # Bankroll
+    "bankroll_id": 7,
+    "starting_bankroll": 500.0,
+    # Risk limits
+    "max_open_per_city_date": 1,
+    "max_open_total": 10,
+    "max_daily_loss": 30.0,
+    "max_single_city_exposure": 20.0,
 }
 
 
-# ── Strategy A: Forecast Edge (new) ──────────────────────────────────────────
-# Simpler gate stack. No consensus, no spread gate, no directional probability
-# gate. The forecast gap IS the margin of safety.
-FORECAST_EDGE_CONFIG = {
-    # --- Forecast gap gate: THE defining gate ---
-    "forecast_gap_f": 4.0,   # US cities: primary must be ≥4°F past threshold
-    "forecast_gap_c": 2.0,   # International: primary must be ≥2°C past threshold
-
-    # --- Same core filters as Strategy B ---
-    "min_edge": 0.08,
-    "min_event_volume": 5000,
-    "min_bucket_volume": 500,
-
-    # --- Same crowd / price bounds ---
-    "max_yes_price_for_no": 0.80,
-    "max_yes_price": 0.42,
-    "min_no_price": 0.58,
-
-    # --- Same position sizing ---
-    "kelly_fraction": 0.25,
-    "max_position_pct": 0.02,
-    "min_position_usd": 10.0,
-    "max_correlated_yes": 3,
-
-    # --- Same multi-day city caps ---
-    "max_positions_per_city": 3,
-    "max_city_exposure_pct": 0.06,
-
-    # --- Circuit breakers (disabled for paper) ---
-    "daily_loss_cap_pct": 1.00,
-    "daily_loss_cap_floor_usd": 50.0,
-    "bankroll_floor": 0.0,
-
-    # --- Fees ---
-    "polymarket_fee_pct": 0.02,
-}
-
-# Bankroll IDs — maps strategy name to bankroll_state row ID
+# ── Bankroll IDs — maps strategy name to bankroll_state row ID ───────────────
+# Legacy IDs 1 (sigma) and 2 (forecast_edge) are retired and removed.
+# The rows still exist in the DB but are not referenced by any v2 code.
 STRATEGY_BANKROLL_ID = {
-    "sigma": 1,
-    "forecast_edge": 2,
     "spectrum": 3,
+    "sniper_yes": 4,
+    "sniper_no": 5,
+    "ladder_3": 6,
+    "ladder_5": 7,
 }
 
 
-# ── Strategy C: Spectrum (native bucket EV) ───────────────────────────────────
-# Trades individual Polymarket buckets directly. Both sides of the comparison
-# are native: forecast bucket probability vs real bucket market price.
-# YES-only at launch. One best bucket per city-date.
-SPECTRUM_CONFIG = {
-    # --- Bucket edge gate ---
-    "min_bucket_edge": 0.08,         # 8% minimum edge per bucket
-
-    # --- Price bounds (individual bucket) ---
-    "max_yes_price": 0.50,           # don't buy YES above 50¢
-
-    # --- Peak proximity (HARD GATE) ---
-    "max_buckets_from_peak": 3,      # only trade within 3 positions of forecast peak
-
-    # --- Minimum forecast probability (HARD GATE) ---
-    "min_forecast_prob": 0.05,       # bucket must have ≥5% model probability
-
-    # --- Liquidity ---
-    "min_event_volume": 5000,
-    "min_bucket_volume": 500,
-
-    # --- Position sizing ---
-    "kelly_fraction": 0.25,
-    "max_position_pct": 0.02,
-    "min_position_usd": 10.0,
-
-    # --- City caps ---
-    "max_positions_per_city": 3,
-    "max_city_exposure_pct": 0.06,
-
-    # --- Circuit breakers (disabled for paper) ---
-    "daily_loss_cap_pct": 1.00,
-    "daily_loss_cap_floor_usd": 50.0,
-    "bankroll_floor": 0.0,
-
-    # --- Fees ---
-    "polymarket_fee_pct": 0.02,
-}
-
-
-# ── Cities ────────────────────────────────────────────────────────────────────
+# ── Cities (10) ──────────────────────────────────────────────────────────────
 INTL_DEFAULT_MODEL = "icon_seamless"
 INTL_DEFAULT_LABEL = "ICON"
 
 CITIES = [
-    # ── US (6) — NOAA primary + GFS validator ─────────────────────────────────
+    # ── US (6) ───────────────────────────────────────────────────────────
     {"name": "New York",      "lat": 40.7128,  "lon": -74.0060,  "station": "KLGA", "emoji": "🗽",  "celsius": False, "timezone": "America/New_York"},
     {"name": "Chicago",       "lat": 41.8781,  "lon": -87.6298,  "station": "KORD", "emoji": "🌬️", "celsius": False, "timezone": "America/Chicago"},
     {"name": "Seattle",       "lat": 47.6062,  "lon": -122.3321, "station": "KSEA", "emoji": "🌧️", "celsius": False, "timezone": "America/Los_Angeles"},
     {"name": "Atlanta",       "lat": 33.6367,  "lon": -84.4279,  "station": "KATL", "emoji": "🍑",  "celsius": False, "timezone": "America/New_York"},
     {"name": "Dallas",        "lat": 32.8471,  "lon": -96.8518,  "station": "KDAL", "emoji": "🤠",  "celsius": False, "timezone": "America/Chicago"},
     {"name": "Miami",         "lat": 25.7617,  "lon": -80.1918,  "station": "KMIA", "emoji": "🌴",  "celsius": False, "timezone": "America/New_York"},
-    # ── Europe (3) — ICON primary + GFS validator ─────────────────────────────
+    # ── Europe (3) ───────────────────────────────────────────────────────
     {"name": "London",        "lat": 51.5033,  "lon": 0.0550,    "station": "EGLC", "emoji": "🎡",  "celsius": True, "timezone": "Europe/London"},
     {"name": "Paris",         "lat": 48.8566,  "lon": 2.3522,    "station": "LFPG", "emoji": "🗼",  "celsius": True, "timezone": "Europe/Paris"},
     {"name": "Munich",        "lat": 48.1351,  "lon": 11.5820,   "station": "EDDM", "emoji": "🍺",  "celsius": True, "timezone": "Europe/Berlin"},
-    # ── East Asia (1) — JMA single-model ──────────────────────────────────────
+    # ── East Asia (1) ────────────────────────────────────────────────────
     {"name": "Tokyo",         "lat": 35.5494,  "lon": 139.7798,  "station": "RJTT", "emoji": "🏯",  "celsius": True, "timezone": "Asia/Tokyo",     "primary_model": "jma_seamless", "primary_label": "JMA", "single_model": True},
 ]
 

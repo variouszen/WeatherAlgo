@@ -8,7 +8,27 @@ from sqlalchemy import select, update
 import sys, os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import BOT_CONFIG, FORECAST_EDGE_CONFIG, SPECTRUM_CONFIG, STARTING_BANKROLL, STRATEGY_BANKROLL_ID
+from config import STRATEGY_BANKROLL_ID
+
+# v1 legacy configs — define local fallbacks so v1 functions still load
+# without crashing. These code paths are retired (v2 scanner does not call them).
+try:
+    from config import BOT_CONFIG
+except ImportError:
+    BOT_CONFIG = {"polymarket_fee_pct": 0.0, "kelly_fraction": 0.25, "max_position_pct": 0.02,
+                  "min_position_usd": 10.0, "max_correlated_yes": 3}
+try:
+    from config import FORECAST_EDGE_CONFIG
+except ImportError:
+    FORECAST_EDGE_CONFIG = {}
+try:
+    from config import SPECTRUM_CONFIG
+except ImportError:
+    SPECTRUM_CONFIG = {}
+try:
+    from config import STARTING_BANKROLL
+except ImportError:
+    STARTING_BANKROLL = 500.0
 from models.database import Trade, BankrollState, ScanLog, CityCalibration
 
 logger = logging.getLogger(__name__)

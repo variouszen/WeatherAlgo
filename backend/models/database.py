@@ -110,6 +110,32 @@ class Trade(Base):
     bucket_market_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     bucket_center: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
+    # ── V2 ensemble / fill simulation fields (added by migrate_v2.py) ────────
+    ensemble_prob: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    ensemble_members_in_bucket: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    ensemble_total_members: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    gfs_peak_bucket_index: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    ecmwf_peak_bucket_index: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    model_agreement: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    price_source: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    market_ask: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    market_midpoint: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    spread_at_entry: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    book_depth_at_entry: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    simulated_vwap: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    simulated_shares: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    simulated_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    fill_quality: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    model_run_time: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    venue: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    edge_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # Ladder-specific
+    ladder_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    package_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    package_prob: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    package_edge: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    num_legs: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
     # Timestamps
     opened_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
@@ -172,46 +198,35 @@ async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    # Ensure bankroll rows exist for both strategies
+    # Ensure bankroll rows exist for all strategies (v1 legacy + v2)
     async with AsyncSessionLocal() as session:
         from sqlalchemy import select
-        from config import STARTING_BANKROLL
 
-        # Strategy B (sigma) — id=1
-        result = await session.execute(select(BankrollState).where(BankrollState.id == 1))
-        row = result.scalar_one_or_none()
-        if not row:
-            session.add(BankrollState(
-                id=1,
-                balance=STARTING_BANKROLL,
-                starting_balance=STARTING_BANKROLL,
-                daily_loss_today=0.0,
-                strategy="sigma",
-            ))
+        V2_STARTING = 500.0  # v2 bankroll per strategy (spec Section 8)
 
-        # Strategy A (forecast_edge) — id=2
-        result2 = await session.execute(select(BankrollState).where(BankrollState.id == 2))
-        row2 = result2.scalar_one_or_none()
-        if not row2:
-            session.add(BankrollState(
-                id=2,
-                balance=STARTING_BANKROLL,
-                starting_balance=STARTING_BANKROLL,
-                daily_loss_today=0.0,
-                strategy="forecast_edge",
-            ))
+        # All strategy rows: id → (starting_balance, strategy_name)
+        strategy_rows = {
+            1: (2000.0, "sigma"),           # v1 legacy
+            2: (2000.0, "forecast_edge"),   # v1 legacy
+            3: (V2_STARTING, "spectrum"),
+            4: (V2_STARTING, "sniper_yes"),
+            5: (V2_STARTING, "sniper_no"),
+            6: (V2_STARTING, "ladder_3"),
+            7: (V2_STARTING, "ladder_5"),
+        }
 
-        # Strategy C (spectrum) — id=3
-        result3 = await session.execute(select(BankrollState).where(BankrollState.id == 3))
-        row3 = result3.scalar_one_or_none()
-        if not row3:
-            session.add(BankrollState(
-                id=3,
-                balance=STARTING_BANKROLL,
-                starting_balance=STARTING_BANKROLL,
-                daily_loss_today=0.0,
-                strategy="spectrum",
-            ))
+        for row_id, (starting, strategy_name) in strategy_rows.items():
+            result = await session.execute(
+                select(BankrollState).where(BankrollState.id == row_id)
+            )
+            if not result.scalar_one_or_none():
+                session.add(BankrollState(
+                    id=row_id,
+                    balance=starting,
+                    starting_balance=starting,
+                    daily_loss_today=0.0,
+                    strategy=strategy_name,
+                ))
 
         await session.commit()
 

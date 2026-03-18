@@ -9,14 +9,15 @@ from sqlalchemy import select, func, desc
 import sys, os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import BOT_CONFIG, SPECTRUM_CONFIG, STARTING_BANKROLL, DRY_RUN, CITY_MODEL_TIER, STRATEGY_BANKROLL_ID
+from config import DRY_RUN, CITY_MODEL_TIER, STRATEGY_BANKROLL_ID, SCAN_INTERVAL_SECONDS
+from config import SPECTRUM_V2_CONFIG, SNIPER_YES_CONFIG, SNIPER_NO_CONFIG, LADDER_3_CONFIG, LADDER_5_CONFIG
 from models.database import (
     init_db, AsyncSessionLocal,
     Trade, BankrollState, ScanLog, CityCalibration,
     BucketMappingDiagnostic,
 )
 from core.signals import get_bankroll
-from core.scanner import run_scan
+from scanner_v2 import run_scan_v2
 import httpx
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -31,16 +32,16 @@ _last_scan_result = None
 
 @app.on_event("startup")
 async def startup():
-    logger.info("Starting Weather Arb Bot (A/B/C mode — Sigma, Edge, Spectrum)...")
+    logger.info("Starting Weather Arb Bot v2 (5-strategy paper trading)...")
     await init_db()
-    logger.info(f"DB initialized | DRY_RUN={DRY_RUN} | Starting bankroll=${STARTING_BANKROLL}/strategy")
+    logger.info(f"DB initialized | DRY_RUN={DRY_RUN} | $500/strategy × 5 strategies")
     await _purge_old_bucket_diagnostics()
     asyncio.create_task(scan_scheduler())
 
 
 async def scan_scheduler():
-    interval = BOT_CONFIG["scan_interval_seconds"]
-    logger.info(f"Scanner starting — interval={interval}s")
+    interval = SCAN_INTERVAL_SECONDS
+    logger.info(f"Scanner starting (v2) — interval={interval}s")
     await asyncio.sleep(10)
     while True:
         try:
@@ -57,7 +58,7 @@ async def trigger_scan():
         return
     _scan_running = True
     try:
-        _last_scan_result = await run_scan()
+        _last_scan_result = await run_scan_v2()
     finally:
         _scan_running = False
 
@@ -103,19 +104,28 @@ async def serve_analysis():
 # ── Admin endpoints ───────────────────────────────────────────────────────────
 
 @app.post("/api/admin/reset-bankroll")
-async def reset_bankroll_endpoint(strategy: str = "sigma"):
+async def reset_bankroll_endpoint(strategy: str = "spectrum"):
+    # Look up starting bankroll from v2 configs
+    starting_map = {
+        "spectrum": SPECTRUM_V2_CONFIG.get("starting_bankroll", 500.0),
+        "sniper_yes": SNIPER_YES_CONFIG.get("starting_bankroll", 500.0),
+        "sniper_no": SNIPER_NO_CONFIG.get("starting_bankroll", 500.0),
+        "ladder_3": LADDER_3_CONFIG.get("starting_bankroll", 500.0),
+        "ladder_5": LADDER_5_CONFIG.get("starting_bankroll", 500.0),
+    }
+    starting = starting_map.get(strategy, 500.0)
     async with AsyncSessionLocal() as session:
         async with session.begin():
             bankroll_state = await get_bankroll(session, strategy)
             old_balance = bankroll_state.balance
-            bankroll_state.balance = STARTING_BANKROLL
+            bankroll_state.balance = starting
             bankroll_state.daily_loss_today = 0.0
             bankroll_state.last_reset_date = datetime.now(timezone.utc).date().isoformat()
-    return {"status": "reset", "strategy": strategy, "previous_balance": old_balance, "new_balance": STARTING_BANKROLL}
+    return {"status": "reset", "strategy": strategy, "previous_balance": old_balance, "new_balance": starting}
 
 
 @app.post("/api/admin/reset-daily-loss")
-async def reset_daily_loss_endpoint(strategy: str = "sigma"):
+async def reset_daily_loss_endpoint(strategy: str = "spectrum"):
     async with AsyncSessionLocal() as session:
         async with session.begin():
             bankroll_state = await get_bankroll(session, strategy)
@@ -137,7 +147,7 @@ async def purge_all_open_trades(strategy: str = None):
 
             purged = []
             for trade in open_trades:
-                trade_strategy = trade.strategy or "sigma"
+                trade_strategy = trade.strategy or "unknown"
                 bs = await get_bankroll(session, trade_strategy)
                 bs.balance = round(bs.balance + trade.position_size_usd, 2)
                 purged.append({"city": trade.city, "threshold": trade.threshold_f, "direction": trade.direction, "size": trade.position_size_usd, "strategy": trade_strategy})
@@ -167,7 +177,7 @@ async def purge_stale_trades():
                     if trade.opened_at and trade.opened_at.date() < today:
                         is_stale = True
                 if is_stale:
-                    trade_strategy = trade.strategy or "sigma"
+                    trade_strategy = trade.strategy or "unknown"
                     bs = await get_bankroll(session, trade_strategy)
                     bs.balance = round(bs.balance + trade.position_size_usd, 2)
                     purged.append({"id": trade.id, "city": trade.city, "strategy": trade_strategy})
@@ -179,7 +189,7 @@ async def purge_stale_trades():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "dry_run": DRY_RUN, "mode": "abc_testing", "strategies": ["sigma", "forecast_edge", "spectrum"], "timestamp": datetime.now(timezone.utc).isoformat()}
+    return {"status": "ok", "dry_run": DRY_RUN, "mode": "v2_paper", "strategies": ["spectrum", "sniper_yes", "sniper_no", "ladder_3", "ladder_5"], "timestamp": datetime.now(timezone.utc).isoformat()}
 
 
 @app.post("/api/scan")
@@ -209,9 +219,11 @@ async def get_trades(status: str = None, city: str = None, strategy: str = None,
 async def dashboard(strategy: str = None):
     """Dashboard data with optional strategy filter. No filter = all trades combined."""
     async with AsyncSessionLocal() as session:
-        bankroll_b = await get_bankroll(session, "sigma")
-        bankroll_a = await get_bankroll(session, "forecast_edge")
-        bankroll_c = await get_bankroll(session, "spectrum")
+        # Load bankrolls for all v2 strategies
+        v2_strats = ["spectrum", "sniper_yes", "sniper_no", "ladder_3", "ladder_5"]
+        bankrolls = {}
+        for strat in v2_strats:
+            bankrolls[strat] = await get_bankroll(session, strat)
 
         # Trades query with optional strategy filter
         q = select(Trade).order_by(desc(Trade.opened_at)).limit(200)
@@ -238,14 +250,10 @@ async def dashboard(strategy: str = None):
         profit_factor = (gross_wins / gross_losses) if gross_losses > 0 else 0
 
         # Equity curve — use appropriate starting bankroll
-        if strategy == "sigma":
-            start_bal = bankroll_b.starting_balance
-        elif strategy == "forecast_edge":
-            start_bal = bankroll_a.starting_balance
-        elif strategy == "spectrum":
-            start_bal = bankroll_c.starting_balance
+        if strategy and strategy in bankrolls:
+            start_bal = bankrolls[strategy].starting_balance
         else:
-            start_bal = bankroll_b.starting_balance + bankroll_a.starting_balance + bankroll_c.starting_balance
+            start_bal = sum(bs.starting_balance for bs in bankrolls.values())
 
         running_bal = start_bal
         peak = start_bal
@@ -295,13 +303,18 @@ async def dashboard(strategy: str = None):
 
         return {
             "bankroll": {
-                "sigma": {"current": round(bankroll_b.balance, 2), "starting": bankroll_b.starting_balance, "pnl": round(bankroll_b.balance - bankroll_b.starting_balance, 2)},
-                "forecast_edge": {"current": round(bankroll_a.balance, 2), "starting": bankroll_a.starting_balance, "pnl": round(bankroll_a.balance - bankroll_a.starting_balance, 2)},
-                "spectrum": {"current": round(bankroll_c.balance, 2), "starting": bankroll_c.starting_balance, "pnl": round(bankroll_c.balance - bankroll_c.starting_balance, 2)},
-                "combined": {"current": round(bankroll_b.balance + bankroll_a.balance + bankroll_c.balance, 2), "starting": bankroll_b.starting_balance + bankroll_a.starting_balance + bankroll_c.starting_balance},
-                "daily_loss_sigma": round(bankroll_b.daily_loss_today, 2),
-                "daily_loss_forecast_edge": round(bankroll_a.daily_loss_today, 2),
-                "daily_loss_spectrum": round(bankroll_c.daily_loss_today, 2),
+                strat: {
+                    "current": round(bankrolls[strat].balance, 2),
+                    "starting": bankrolls[strat].starting_balance,
+                    "pnl": round(bankrolls[strat].balance - bankrolls[strat].starting_balance, 2),
+                    "daily_loss": round(bankrolls[strat].daily_loss_today, 2),
+                }
+                for strat in v2_strats
+            } | {
+                "combined": {
+                    "current": round(sum(bs.balance for bs in bankrolls.values()), 2),
+                    "starting": sum(bs.starting_balance for bs in bankrolls.values()),
+                },
             },
             "performance": {
                 "total_trades": len(settled), "open_positions": len(open_trades),
@@ -318,7 +331,7 @@ async def dashboard(strategy: str = None):
             "trade_history": [_trade_to_dict(t) for t in settled[:50]],
             "city_stats": city_stats,
             "scan_logs": [_scan_log_to_dict(s) for s in scan_logs],
-            "config": BOT_CONFIG,
+            "config": {"version": "v2", "strategies": list(STRATEGY_BANKROLL_ID.keys())},
             "dry_run": DRY_RUN,
             "scan_running": _scan_running,
             "last_scan": _last_scan_result,
@@ -327,9 +340,9 @@ async def dashboard(strategy: str = None):
 
 
 async def _build_strategy_comparison(session):
-    """Build side-by-side strategy comparison data."""
+    """Build side-by-side strategy comparison data for v2 strategies."""
     result = {}
-    for strat in ["sigma", "forecast_edge", "spectrum"]:
+    for strat in ["spectrum", "sniper_yes", "sniper_no", "ladder_3", "ladder_5"]:
         q = select(Trade).where(Trade.status.in_(["WIN", "LOSS"]), Trade.strategy == strat)
         trades_result = await session.execute(q)
         trades = trades_result.scalars().all()
@@ -459,7 +472,7 @@ def _trade_to_dict(t: Trade) -> dict:
         "resolved_at": t.resolved_at.isoformat() if t.resolved_at else None,
         "polymarket_market_id": t.polymarket_market_id,
         # A/B testing fields
-        "strategy": t.strategy or "sigma",
+        "strategy": t.strategy or "unknown",
         "forecast_gap": t.forecast_gap,
         "validator_gap": t.validator_gap,
         "same_side_as_forecast": t.same_side_as_forecast,

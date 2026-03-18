@@ -3,7 +3,9 @@ import uvicorn
 import sys
 import os
 
-# Add backend to path
+# Add repo root for v2 modules (signals/, forecast/, Venue/)
+sys.path.insert(0, os.path.dirname(__file__))
+# Add backend for v1 modules (config, core/, models/, data/)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "backend"))
 
 if __name__ == "__main__":

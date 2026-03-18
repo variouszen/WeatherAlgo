@@ -8,7 +8,30 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import sys, os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import BOT_CONFIG, FORECAST_EDGE_CONFIG, SPECTRUM_CONFIG, CITIES, STRATEGY_BANKROLL_ID
+from config import CITIES, STRATEGY_BANKROLL_ID
+
+# v1 legacy configs — local fallbacks so this file loads without crashing.
+# v1 scan loop (run_scan) is retired — v2 uses run_scan_v2() instead.
+try:
+    from config import BOT_CONFIG
+except ImportError:
+    BOT_CONFIG = {"scan_interval_seconds": 300, "min_event_volume": 5000,
+                  "min_bucket_volume": 500, "max_positions_per_city": 3,
+                  "max_city_exposure_pct": 0.06, "early_window_hours": 6,
+                  "reentry_cooldown_minutes": 45, "reentry_no_late_entry_hours": 3,
+                  "max_correlated_yes": 3, "daily_loss_cap_pct": 1.0,
+                  "daily_loss_cap_floor_usd": 50.0}
+try:
+    from config import FORECAST_EDGE_CONFIG
+except ImportError:
+    FORECAST_EDGE_CONFIG = {"max_positions_per_city": 3, "max_city_exposure_pct": 0.06,
+                            "daily_loss_cap_pct": 1.0, "daily_loss_cap_floor_usd": 50.0}
+try:
+    from config import SPECTRUM_CONFIG
+except ImportError:
+    SPECTRUM_CONFIG = {"min_event_volume": 5000, "min_bucket_volume": 500,
+                       "max_positions_per_city": 3, "max_city_exposure_pct": 0.06,
+                       "daily_loss_cap_pct": 1.0, "daily_loss_cap_floor_usd": 50.0}
 from data.noaa import (
     get_nws_daily_high, get_openmeteo_daily_high,
     fetch_gfs_forecast_high, prob_above as _prob_above_fn,
