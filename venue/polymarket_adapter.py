@@ -12,6 +12,14 @@ Paper mode: DRY_RUN=true logs order to DB, skips CLOB submission
 Reuses from backend/data/polymarket.py:
   - build_slug(), parse_bucket_range(), fetch_event_by_slug(), validate_bucket_set()
   - _parse_json_field(), check_event_resolution()
+
+Phase 5A: Gamma pricing removed from execution/tradability entirely.
+  - A side is tradable ONLY with live CLOB data (get_price or order book)
+  - Gamma outcomePrices used for discovery/metadata/logging only
+  - If get_price fails, order book best ask is checked before declaring dead
+  - Per-side tradable flags (yes_tradable / no_tradable) on BucketMarket
+  - Buckets kept if either side is live; dropped only if both sides dead
+  - Price range log normalized to true min→max
 """
 
 from __future__ import annotations
@@ -66,15 +74,17 @@ HEADERS = {
 class PolymarketAdapter(VenueAdapter):
     """
     Polymarket implementation of VenueAdapter.
-    
+
     Uses Gamma API for market discovery and CLOB API for live pricing.
     All prices use get_price(side=BUY) as truth per spec decision #4.
+
+    Phase 5A: Gamma is discovery/logging only. CLOB is execution truth.
     """
-    
+
     def __init__(self, dry_run: bool = None):
         self.dry_run = dry_run if dry_run is not None else DRY_RUN
         self._client = None  # Lazy init for async context
-    
+
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create an async HTTP client."""
         if self._client is None or self._client.is_closed:
@@ -83,15 +93,45 @@ class PolymarketAdapter(VenueAdapter):
                 timeout=15.0,
             )
         return self._client
-    
+
     async def close(self):
         """Close the HTTP client."""
         if self._client and not self._client.is_closed:
             await self._client.aclose()
             self._client = None
-    
+
+    # ── Live CLOB price resolution (per-token) ───────────────────────────────
+
+    async def _resolve_live_price(self, token_id: str) -> tuple[float, bool]:
+        """
+        Resolve a live CLOB price for a token.
+
+        Tries get_price(BUY) first. If that fails, checks get_order_book()
+        for usable live asks. Order book data is real venue data and counts.
+
+        Returns:
+            (price, is_tradable) — price is 0.0 if no live CLOB path exists.
+        """
+        # Try 1: get_price(BUY) — the truth price
+        price = await self.get_ask_price(token_id, side="BUY")
+        if price is not None and price > 0:
+            return price, True
+
+        # Try 2: order book — still real live CLOB data
+        try:
+            order_book = await self.get_order_book(token_id)
+            if order_book is not None and order_book.asks:
+                best_ask = order_book.asks[0].price
+                if best_ask > 0:
+                    return best_ask, True
+        except Exception:
+            pass
+
+        # No live CLOB path exists
+        return 0.0, False
+
     # ── Market Discovery ──────────────────────────────────────────────────────
-    
+
     async def discover_markets(
         self,
         city: str,
@@ -101,25 +141,30 @@ class PolymarketAdapter(VenueAdapter):
         """
         Fetch Polymarket temperature event for city+date and return
         standardized BucketMarket objects with live CLOB prices.
-        
+
+        Phase 5A: Tradability is determined by live CLOB data only.
+        Gamma outcomePrices are stored for logging but never make a side tradable.
+        Buckets are kept if either side has live CLOB pricing.
+        Buckets are dropped only if both sides lack live CLOB data.
+
         Returns ordered list sorted by bucket_low, or None if no valid market.
         """
         client = await self._get_client()
-        
+
         # Fetch event via existing validated slug logic
         event, rejection = await fetch_event_by_slug(city, target_date, client)
         if event is None:
             logger.info(f"[Adapter] SKIP {city}/{target_date}: {rejection}")
             return None
-        
+
         nested_markets = event.get("markets", [])
         if not nested_markets:
             logger.warning(f"[Adapter] {city}/{target_date}: no nested markets")
             return None
-        
+
         # Parse all buckets and fetch CLOB prices
         raw_buckets = []
-        
+
         for nm in nested_markets:
             label = (
                 nm.get("groupItemTitle")
@@ -129,35 +174,35 @@ class PolymarketAdapter(VenueAdapter):
             ).strip()
             if not label:
                 continue
-            
+
             parsed = parse_bucket_range(label)
             if parsed is None:
                 logger.debug(f"[Adapter] Unparseable bucket: '{label[:60]}'")
                 continue
-            
+
             lo, hi = parsed
-            
+
             # Extract token IDs
             clob_ids = _parse_json_field(nm.get("clobTokenIds", "[]"))
             if len(clob_ids) < 2:
                 logger.debug(f"[Adapter] Missing token IDs for '{label[:40]}'")
                 continue
-            
+
             yes_token = clob_ids[0]
             no_token = clob_ids[1]
-            
-            # Gamma snapshot prices (stale, for comparison logging)
+
+            # Gamma snapshot prices (discovery/logging only — never for execution)
             outcome_prices = _parse_json_field(nm.get("outcomePrices", "[]"))
             gamma_yes = float(outcome_prices[0]) if len(outcome_prices) > 0 else 0.0
             gamma_no = float(outcome_prices[1]) if len(outcome_prices) > 1 else 0.0
-            
+
             # Volume
             vol = float(nm.get("volumeNum") or nm.get("volume") or 0)
-            
+
             # Market/condition IDs
             condition_id = nm.get("conditionId", "")
             market_id = str(nm.get("id", ""))
-            
+
             raw_buckets.append({
                 "label": label,
                 "low": lo,
@@ -170,35 +215,34 @@ class PolymarketAdapter(VenueAdapter):
                 "condition_id": condition_id,
                 "market_id": market_id,
             })
-        
+
         if not raw_buckets:
             logger.warning(f"[Adapter] {city}/{target_date}: no parseable buckets")
             return None
-        
+
         # Sort by lower bound (treat None/open-lower as -inf)
         raw_buckets.sort(key=lambda b: b["low"] if b["low"] != float("-inf") and b["low"] is not None else -9999)
-        
-        # Fetch live CLOB prices for all buckets
+
+        # Fetch live CLOB prices for all buckets with per-side tradability
         bucket_markets = []
+        skipped_both_dead = 0
+
         for idx, rb in enumerate(raw_buckets):
-            # YES ask price (truth per spec)
-            yes_ask = await self.get_ask_price(rb["yes_token"], side="BUY")
-            if yes_ask is None:
-                # Fallback to Gamma snapshot with penalty
-                if rb["gamma_yes"] > 0:
-                    yes_ask = rb["gamma_yes"] + max(0.01, rb["gamma_yes"] * 0.05)
-                    logger.debug(
-                        f"[Adapter] {rb['label']}: CLOB unavailable, "
-                        f"using stale Gamma+penalty={yes_ask:.3f}"
-                    )
-                else:
-                    yes_ask = 0.0
-            
-            # NO ask price
-            no_ask = await self.get_ask_price(rb["no_token"], side="BUY")
-            if no_ask is None:
-                no_ask = rb["gamma_no"] + max(0.01, rb["gamma_no"] * 0.05) if rb["gamma_no"] > 0 else 0.0
-            
+            # ── YES side: live CLOB only ─────────────────────────────────
+            yes_ask, yes_tradable = await self._resolve_live_price(rb["yes_token"])
+
+            # ── NO side: live CLOB only ──────────────────────────────────
+            no_ask, no_tradable = await self._resolve_live_price(rb["no_token"])
+
+            # ── Drop bucket only if BOTH sides lack live CLOB data ───────
+            if not yes_tradable and not no_tradable:
+                skipped_both_dead += 1
+                logger.info(
+                    f"[Adapter] SKIP dead bucket {city}/{target_date} '{rb['label']}' | "
+                    f"YES: no live CLOB | NO: no live CLOB"
+                )
+                continue
+
             bucket_markets.append(BucketMarket(
                 bucket_label=rb["label"],
                 bucket_index=idx,
@@ -211,24 +255,47 @@ class PolymarketAdapter(VenueAdapter):
                 no_ask_price=no_ask,
                 volume=rb["volume"],
                 venue="polymarket",
+                yes_tradable=yes_tradable,
+                no_tradable=no_tradable,
                 gamma_yes_price=rb["gamma_yes"],
                 gamma_no_price=rb["gamma_no"],
                 condition_id=rb["condition_id"],
                 market_id=rb["market_id"],
             ))
-        
+
         if not bucket_markets:
             return None
-        
+
+        # Log with true min→max price range
+        valid_yes_asks = [b.ask_price for b in bucket_markets if b.ask_price > 0]
+        if valid_yes_asks:
+            price_range_str = f"price range {min(valid_yes_asks):.3f}-{max(valid_yes_asks):.3f}"
+        else:
+            price_range_str = "no valid YES prices"
+
+        # Dead-side diagnostics
+        yes_dead = sum(1 for b in bucket_markets if not b.yes_tradable)
+        no_dead = sum(1 for b in bucket_markets if not b.no_tradable)
+        dead_note = ""
+        if skipped_both_dead or yes_dead or no_dead:
+            parts = []
+            if skipped_both_dead:
+                parts.append(f"{skipped_both_dead} fully dead")
+            if yes_dead:
+                parts.append(f"{yes_dead} YES-dead")
+            if no_dead:
+                parts.append(f"{no_dead} NO-dead")
+            dead_note = f" ({', '.join(parts)})"
+
         logger.info(
             f"[Adapter] {city}/{target_date}: {len(bucket_markets)} buckets discovered, "
-            f"price range {bucket_markets[0].ask_price:.3f}-{bucket_markets[-1].ask_price:.3f}"
+            f"{price_range_str}{dead_note}"
         )
-        
+
         return bucket_markets
-    
+
     # ── Pricing ───────────────────────────────────────────────────────────────
-    
+
     async def get_ask_price(
         self,
         token_id: str,
@@ -237,7 +304,7 @@ class PolymarketAdapter(VenueAdapter):
         """
         Get live best ask from CLOB get_price(side=BUY).
         This is the truth price per spec decision #4.
-        
+
         CLOB returns prices as strings (e.g., {'price': '0.011'}).
         """
         client = await self._get_client()
@@ -249,7 +316,7 @@ class PolymarketAdapter(VenueAdapter):
             )
             if resp.status_code != 200:
                 return None
-            
+
             data = resp.json()
             price_str = data.get("price")
             if price_str is not None:
@@ -257,18 +324,18 @@ class PolymarketAdapter(VenueAdapter):
                 if 0.0 < price < 1.0:
                     return price
             return None
-            
+
         except Exception as e:
             logger.debug(f"[Adapter] get_ask_price failed for {token_id[:16]}...: {e}")
             return None
-    
+
     async def get_order_book(
         self,
         token_id: str,
     ) -> Optional[OrderBook]:
         """
         Get full order book from CLOB /book endpoint.
-        
+
         CLOB returns price/size as strings — converts to float.
         Asks sorted ascending (best ask first).
         Bids sorted descending (best bid first).
@@ -282,9 +349,9 @@ class PolymarketAdapter(VenueAdapter):
             )
             if resp.status_code != 200:
                 return None
-            
+
             data = resp.json()
-            
+
             asks = []
             for a in data.get("asks", []):
                 try:
@@ -294,7 +361,7 @@ class PolymarketAdapter(VenueAdapter):
                     ))
                 except (KeyError, ValueError, TypeError):
                     continue
-            
+
             bids = []
             for b in data.get("bids", []):
                 try:
@@ -304,23 +371,23 @@ class PolymarketAdapter(VenueAdapter):
                     ))
                 except (KeyError, ValueError, TypeError):
                     continue
-            
+
             # Sort: asks ascending, bids descending
             asks.sort(key=lambda x: x.price)
             bids.sort(key=lambda x: x.price, reverse=True)
-            
+
             return OrderBook(
                 token_id=token_id,
                 asks=asks,
                 bids=bids,
             )
-            
+
         except Exception as e:
             logger.debug(f"[Adapter] get_order_book failed for {token_id[:16]}...: {e}")
             return None
-    
+
     # ── Execution ─────────────────────────────────────────────────────────────
-    
+
     async def place_order(
         self,
         token_id: str,
@@ -330,7 +397,7 @@ class PolymarketAdapter(VenueAdapter):
     ) -> OrderResult:
         """
         Place an order on Polymarket.
-        
+
         In DRY_RUN mode: returns simulated success without submitting.
         In live mode: uses py-clob-client with neg_risk=True, tick_size="0.001".
         """
@@ -348,10 +415,8 @@ class PolymarketAdapter(VenueAdapter):
                 filled_price=max_price,
                 dry_run=True,
             )
-        
+
         # ── Live execution (future — requires POLYMARKET_PRIVATE_KEY) ─────
-        # This is where py-clob-client integration goes.
-        # ~50-80 lines to replace this block when transitioning to live.
         logger.error(
             "[Adapter] Live execution not yet implemented. "
             "Set DRY_RUN=true or implement py-clob-client integration."
@@ -360,27 +425,27 @@ class PolymarketAdapter(VenueAdapter):
             success=False,
             error="Live execution not implemented",
         )
-    
+
     async def cancel_order(self, order_id: str) -> bool:
         """Cancel an open order on Polymarket."""
         if self.dry_run:
             logger.info(f"[Adapter] DRY_RUN cancel: {order_id}")
             return True
-        
+
         # Live cancellation via py-clob-client (future)
         logger.error("[Adapter] Live cancel not yet implemented")
         return False
-    
+
     async def get_positions(self) -> List[Dict]:
         """Get open positions from Polymarket."""
         if self.dry_run:
             return []  # Paper positions tracked in DB, not on venue
-        
+
         # Live positions via py-clob-client (future)
         return []
-    
+
     # ── Settlement ────────────────────────────────────────────────────────────
-    
+
     async def check_settlement(
         self,
         city: str,
@@ -388,18 +453,18 @@ class PolymarketAdapter(VenueAdapter):
     ) -> Optional[SettlementResult]:
         """
         Check if a Polymarket temperature event has settled.
-        
+
         Reuses existing check_event_resolution() from polymarket.py which
         re-fetches the event by slug and checks for binary outcome prices.
         """
         result = await check_event_resolution(city, market_date_str)
-        
+
         if result is None:
             return None
-        
+
         if not result.get("resolved", False):
             return SettlementResult(resolved=False)
-        
+
         return SettlementResult(
             resolved=True,
             winning_label=result.get("winning_label", ""),

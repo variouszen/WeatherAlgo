@@ -26,8 +26,11 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="Weather Arb Bot", version="2.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+# Phase 5A: asyncio.Lock for reliable scan/reset serialization.
+# _scan_running kept for status/UI; _scan_lock is the real guard.
 _scan_running = False
 _last_scan_result = None
+_scan_lock = asyncio.Lock()
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -75,14 +78,17 @@ async def scan_scheduler():
 
 async def trigger_scan():
     global _scan_running, _last_scan_result
-    if _scan_running:
-        logger.warning("Scan already running, skipping")
+    # Strict refuse: if lock is held (by another scan or reset), skip immediately.
+    # No await between check and acquire — no coroutine can sneak in.
+    if _scan_lock.locked():
+        logger.warning("Scan skipped — lock held (scan or reset active)")
         return
-    _scan_running = True
-    try:
-        _last_scan_result = await run_scan_v2()
-    finally:
-        _scan_running = False
+    async with _scan_lock:
+        _scan_running = True
+        try:
+            _last_scan_result = await run_scan_v2()
+        finally:
+            _scan_running = False
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -304,7 +310,7 @@ async def get_v2_stats():
             roc = ((bs.balance - bs.starting_balance) / bs.starting_balance * 100) if bs.starting_balance > 0 else 0
 
             # Fill quality breakdown (all trades including open)
-            fill_counts = {"full": 0, "shallow": 0, "stale": 0, "unknown": 0}
+            fill_counts = {"full": 0, "shallow": 0, "unknown": 0}
             for t in all_trades:
                 fq = (t.fill_quality or "unknown").lower()
                 fill_counts[fq] = fill_counts.get(fq, 0) + 1
@@ -365,9 +371,6 @@ async def get_v2_stats():
                     kill_flags.append(f"Win rate {win_rate:.1f}% < {kills['min_win_rate']}%")
                 if max_dd_pct > kills["max_drawdown_pct"]:
                     kill_flags.append(f"Drawdown {max_dd_pct:.1f}% > {kills['max_drawdown_pct']}%")
-                total_fill = sum(fill_counts.values())
-                if total_fill > 0 and (fill_counts.get("stale", 0) / total_fill) > 0.5:
-                    kill_flags.append(f"Stale fills > 50%")
 
             result[strat] = {
                 "bankroll": {
@@ -550,7 +553,7 @@ async def health():
 
 @app.post("/api/scan")
 async def manual_scan(background_tasks: BackgroundTasks):
-    if _scan_running:
+    if _scan_lock.locked():
         return {"status": "already_running"}
     background_tasks.add_task(trigger_scan)
     return {"status": "started"}
@@ -600,39 +603,42 @@ async def full_reset_endpoint(confirm: str = ""):
             "message": "Add ?confirm=YES to actually execute. This will DELETE all trades and reset all bankrolls.",
         }
 
-    # Refuse if scan is actively running — avoid DB race conditions
-    if _scan_running:
-        return {
-            "status": "refused",
-            "message": "A scan is currently running. Wait for it to finish before resetting.",
-        }
+    # Phase 5A: Strict refuse if scan or other operation holds the lock.
+    # No await between check and acquire — no coroutine can sneak in.
+    if _scan_lock.locked():
+        raise HTTPException(
+            status_code=409,
+            detail="A scan is currently running. Wait for it to finish before resetting.",
+        )
 
-    async with AsyncSessionLocal() as session:
-        async with session.begin():
-            # 1. Delete ALL trades (v1 legacy + v2 — we no longer preserve v1 rows)
-            del_trades = await session.execute(delete(Trade))
-            trades_deleted = del_trades.rowcount
+    # Acquire lock for reset — prevents scan from starting during wipe.
+    async with _scan_lock:
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                # 1. Delete ALL trades (v1 legacy + v2 — we no longer preserve v1 rows)
+                del_trades = await session.execute(delete(Trade))
+                trades_deleted = del_trades.rowcount
 
-            # 2. Delete scan logs
-            del_scans = await session.execute(delete(ScanLog))
-            scans_deleted = del_scans.rowcount
+                # 2. Delete scan logs
+                del_scans = await session.execute(delete(ScanLog))
+                scans_deleted = del_scans.rowcount
 
-            # 3. Reset all v2 bankrolls
-            for strat in V2_STRATEGIES:
-                bs = await get_bankroll(session, strat)
-                starting = V2_CONFIGS[strat].get("starting_bankroll", 500.0)
-                bs.balance = starting
-                bs.starting_balance = starting
-                bs.daily_loss_today = 0.0
-                bs.last_reset_date = datetime.now(timezone.utc).date().isoformat()
+                # 3. Reset all v2 bankrolls
+                for strat in V2_STRATEGIES:
+                    bs = await get_bankroll(session, strat)
+                    starting = V2_CONFIGS[strat].get("starting_bankroll", 500.0)
+                    bs.balance = starting
+                    bs.starting_balance = starting
+                    bs.daily_loss_today = 0.0
+                    bs.last_reset_date = datetime.now(timezone.utc).date().isoformat()
 
-    # 4. Clear runtime state
-    _last_scan_result = None
-    try:
-        from scanner_v2 import _clear_ensemble_cache
-        _clear_ensemble_cache()
-    except ImportError:
-        pass
+        # 4. Clear runtime state (still inside lock)
+        _last_scan_result = None
+        try:
+            from scanner_v2 import _clear_ensemble_cache
+            _clear_ensemble_cache()
+        except ImportError:
+            pass
 
     logger.info(f"[ADMIN] Full reset: {trades_deleted} trades deleted, {scans_deleted} scan logs deleted, bankrolls reset, caches cleared")
     return {

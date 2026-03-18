@@ -14,13 +14,38 @@ Gate order (from Master Spec Section 3A):
   5. Fillability: fill simulation passes on the token being traded
   6. City-date dedup: no existing Spectrum position on this city-date
   7. Bankroll floor: bankroll > 0
+
+Phase 5A:
+  - All quote values normalized through _safe_float() before comparison
+  - Per-side tradable flags checked (yes_tradable / no_tradable)
+  - No Gamma/stale pricing in fill paths — live CLOB only
+  - OrderBook dataclass handling in _fetch_quote_context
 """
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from signals import TradeSignal, FillResult
 from signals.fill_simulator import resolve_fill, compute_book_depth
+
+logger = logging.getLogger(__name__)
+
+
+# ── Safe numeric normalization ───────────────────────────────────────────────
+
+def _safe_float(value, default: float = 0.0) -> float:
+    """
+    Normalize a quote-like value to a safe float for numeric comparison.
+    Returns default if value is None, non-numeric, or conversion fails.
+    Never returns None.
+    """
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 # ── Helper: fetch quote context for a token ──────────────────────────────────
@@ -30,23 +55,38 @@ async def _fetch_quote_context(token_id: str, venue_adapter) -> dict:
     Fetch ask, bid, spread, midpoint, and book depth for a specific token.
     All fields reference the same token — no cross-side contamination.
     Returns a dict with logging fields. Falls back to sentinels on error.
+
+    All values normalized through _safe_float().
+    Handles OrderBook dataclass returns from adapter.
     """
     result = {"ask": 0.0, "bid": 0.0, "spread": 0.0, "midpoint": 0.0, "depth": 0.0}
 
     try:
-        result["ask"] = await venue_adapter.get_ask_price(token_id)
+        raw_ask = await venue_adapter.get_ask_price(token_id)
+        result["ask"] = _safe_float(raw_ask)
     except Exception:
         pass
 
     try:
         order_book = await venue_adapter.get_order_book(token_id)
-        asks = order_book.get("asks", []) if isinstance(order_book, dict) else []
-        bids = order_book.get("bids", []) if isinstance(order_book, dict) else []
-        result["depth"] = compute_book_depth(asks)
-        if asks and result["ask"] == 0.0:
-            result["ask"] = float(asks[0]["price"])
-        if bids:
-            result["bid"] = float(bids[0]["price"])
+        if order_book is not None:
+            if hasattr(order_book, 'asks'):
+                ask_dicts = [{"price": a.price, "size": a.size} for a in (order_book.asks or [])]
+                bid_dicts = [{"price": b.price, "size": b.size} for b in (order_book.bids or [])]
+            elif isinstance(order_book, dict):
+                ask_dicts = order_book.get("asks", [])
+                bid_dicts = order_book.get("bids", [])
+            else:
+                ask_dicts = []
+                bid_dicts = []
+
+            result["depth"] = compute_book_depth(ask_dicts)
+            if ask_dicts and result["ask"] == 0.0:
+                first = ask_dicts[0]
+                result["ask"] = _safe_float(first.get("price") if isinstance(first, dict) else getattr(first, 'price', 0))
+            if bid_dicts:
+                first = bid_dicts[0]
+                result["bid"] = _safe_float(first.get("price") if isinstance(first, dict) else getattr(first, 'price', 0))
     except Exception:
         pass
 
@@ -114,7 +154,12 @@ async def evaluate_spectrum(
         members_in = round(prob * ensemble_total_members)
 
         # --- YES side evaluation ---
-        yes_ask = bkt.ask_price
+        yes_ask = _safe_float(bkt.ask_price)
+
+        # Skip if YES side has no live CLOB data
+        if not bkt.yes_tradable:
+            yes_ask = 0.0
+
         if yes_ask > 0:
             yes_edge = prob - yes_ask
 
@@ -138,12 +183,15 @@ async def evaluate_spectrum(
                             })
 
         # --- NO side evaluation ---
-        # Fetch ACTUAL NO ask from the NO token — not 1-yes_bid approximation
+        # Skip if NO side has no live CLOB data
+        if not bkt.no_tradable:
+            continue
+
         no_prob = 1.0 - prob
-        try:
-            no_ask = await venue_adapter.get_ask_price(bkt.no_token_id)
-        except Exception:
-            no_ask = 0.0  # Cannot price → skip NO side for this bucket
+        # Use the NO ask that the adapter already resolved from live CLOB
+        # (get_price OR order book best ask). Do not re-fetch — the adapter
+        # already determined tradability and set no_ask_price from live data.
+        no_ask = _safe_float(bkt.no_ask_price)
 
         if no_ask > 0 and no_ask < 1.0:
             no_edge = no_prob - no_ask
@@ -178,7 +226,6 @@ async def evaluate_spectrum(
             token_id=cand["token_id"],
             target_spend_usd=trade_size,
             venue_adapter=venue_adapter,
-            gamma_price=cand["ask"],
         )
 
         if not fill.filled:
@@ -187,8 +234,6 @@ async def evaluate_spectrum(
         bkt = cand["bucket"]
 
         # Fetch quote context for the TRADED token (YES or NO)
-        # All logging fields (ask, bid, spread, midpoint, depth) come from
-        # the same token being traded — no cross-side contamination.
         quote = await _fetch_quote_context(cand["token_id"], venue_adapter)
 
         return TradeSignal(
@@ -205,9 +250,9 @@ async def evaluate_spectrum(
             ecmwf_peak_index=ecmwf_peak_index,
             model_agreement=abs(gfs_peak_index - ecmwf_peak_index) <= 2,
             entry_price=fill.vwap,
-            market_ask=cand["ask"],            # Actual ask on traded token
-            market_bid=quote["bid"],            # Bid on traded token
-            spread_at_entry=quote["spread"],    # Spread on traded token
+            market_ask=cand["ask"],
+            market_bid=quote["bid"],
+            spread_at_entry=quote["spread"],
             midpoint_at_entry=quote["midpoint"],
             book_depth_at_entry=quote["depth"],
             simulated_shares=fill.total_shares,

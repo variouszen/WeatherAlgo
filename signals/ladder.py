@@ -26,6 +26,11 @@ Partial fill rules (Spec Section 3D):
   - 2+ buckets unfillable → REJECT entire ladder
 
 Ladder dedup: Two Ladders (3 and 5) on same city-date NOT allowed.
+
+Phase 5A:
+  - No Gamma/stale pricing in fill paths — live CLOB only
+  - Per-side tradable flag checked (ladders are YES only)
+  - Safe float normalization on ask_price
 """
 from __future__ import annotations
 
@@ -36,6 +41,16 @@ from signals.fill_simulator import resolve_fill, compute_book_depth
 
 
 SHARES_PER_BUCKET = 10
+
+
+def _safe_float(value, default: float = 0.0) -> float:
+    """Normalize a quote-like value to a safe float. Never returns None."""
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 async def evaluate_ladder(
@@ -129,18 +144,41 @@ async def evaluate_ladder(
             return None
 
     # ── Gate 4: Fillability — test each bucket independently ─────────────
+    # Ladders are YES only — skip any bucket where YES side is dead
     leg_fills = []
     unfillable_indices = []
 
     for offset, bkt in enumerate(window_buckets):
         abs_index = window_start + offset
-        target_spend = shares_per_bucket * bkt.ask_price if bkt.ask_price > 0 else shares_per_bucket * 0.50
+
+        # If YES side has no live CLOB data, mark as unfillable
+        if not bkt.yes_tradable:
+            leg_fills.append({
+                "bucket": bkt,
+                "abs_index": abs_index,
+                "fill": None,
+                "offset": offset,
+            })
+            unfillable_indices.append(offset)
+            continue
+
+        ask_price = _safe_float(bkt.ask_price)
+        target_spend = shares_per_bucket * ask_price if ask_price > 0 else 0.0
+
+        if target_spend <= 0:
+            leg_fills.append({
+                "bucket": bkt,
+                "abs_index": abs_index,
+                "fill": None,
+                "offset": offset,
+            })
+            unfillable_indices.append(offset)
+            continue
 
         fill = await resolve_fill(
             token_id=bkt.yes_token_id,  # Ladders are YES only
             target_spend_usd=target_spend,
             venue_adapter=venue_adapter,
-            gamma_price=bkt.ask_price,
         )
 
         leg_fills.append({
@@ -173,6 +211,11 @@ async def evaluate_ladder(
     if not leg_fills:
         return None
 
+    # Filter out any entries with no fill (shouldn't happen after above, but defensive)
+    leg_fills = [lf for lf in leg_fills if lf["fill"] is not None and lf["fill"].filled]
+    if not leg_fills:
+        return None
+
     # ── Package math ─────────────────────────────────────────────────────
     package_cost = 0.0
     package_prob = 0.0
@@ -187,13 +230,20 @@ async def evaluate_ladder(
         package_cost += fill.total_cost
         package_prob += prob
 
-        spread = bkt.ask_price - bkt.bid_price if bkt.bid_price > 0 else 0.0
-        midpoint = (bkt.ask_price + bkt.bid_price) / 2 if bkt.bid_price > 0 else bkt.ask_price
+        ask_price = _safe_float(bkt.ask_price)
+        bid_price = _safe_float(bkt.bid_price)
+        spread = ask_price - bid_price if bid_price > 0 else 0.0
+        midpoint = (ask_price + bid_price) / 2 if bid_price > 0 else ask_price
 
         try:
             order_book = await venue_adapter.get_order_book(bkt.yes_token_id)
-            asks = order_book.get("asks", []) if isinstance(order_book, dict) else []
-            depth = compute_book_depth(asks)
+            if order_book is not None and hasattr(order_book, 'asks'):
+                ask_dicts = [{"price": a.price, "size": a.size} for a in (order_book.asks or [])]
+            elif isinstance(order_book, dict):
+                ask_dicts = order_book.get("asks", [])
+            else:
+                ask_dicts = []
+            depth = compute_book_depth(ask_dicts)
         except Exception:
             depth = 0.0
 
@@ -211,8 +261,8 @@ async def evaluate_ladder(
             ecmwf_peak_index=ecmwf_peak_index,
             model_agreement=True,  # Passed gate 6
             entry_price=fill.vwap,
-            market_ask=bkt.ask_price,
-            market_bid=bkt.bid_price,
+            market_ask=ask_price,
+            market_bid=bid_price,
             spread_at_entry=spread,
             midpoint_at_entry=midpoint,
             book_depth_at_entry=depth,

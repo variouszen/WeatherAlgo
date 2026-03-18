@@ -6,6 +6,9 @@ Phase 2 modules:
 - spectrum: Spectrum evaluator (YES + NO, best edge per city-date)
 - sniper: Sniper YES and Sniper NO evaluators
 - ladder: Ladder 3 and Ladder 5 evaluators with package math
+
+Phase 5A: Removed stale snapshot pricing path. Only live CLOB sources
+(order_book, best_ask) are valid for fills. Gamma is discovery/logging only.
 """
 from __future__ import annotations
 
@@ -21,8 +24,8 @@ class FillResult:
     total_shares: float = 0.0
     total_cost: float = 0.0
     levels_swept: int = 0
-    fill_quality: str = "rejected"   # "full", "shallow", "stale", "rejected"
-    price_source: str = "none"       # "order_book", "best_ask", "stale_snapshot"
+    fill_quality: str = "rejected"   # "full", "shallow", "rejected"
+    price_source: str = "none"       # "order_book", "best_ask"
     warnings: list[str] = field(default_factory=list)
     reject_reason: str = ""
 
@@ -45,8 +48,8 @@ class TradeSignal:
     ecmwf_peak_index: int
     model_agreement: bool
 
-    # Pricing data
-    entry_price: float         # simulated VWAP or best_ask or stale+penalty
+    # Pricing data (live CLOB only)
+    entry_price: float         # simulated VWAP or best_ask
     market_ask: float          # raw ask price at time of evaluation
     market_bid: float          # raw bid price
     spread_at_entry: float     # ask - bid
@@ -54,8 +57,8 @@ class TradeSignal:
     book_depth_at_entry: float # ask shares within 2 ticks
     simulated_shares: float
     simulated_cost: float
-    fill_quality: str          # "full", "shallow", "stale"
-    price_source: str          # "order_book", "best_ask", "stale_snapshot"
+    fill_quality: str          # "full", "shallow"
+    price_source: str          # "order_book", "best_ask"
     levels_swept: int
 
     # Strategy-specific (optional)
