@@ -393,7 +393,6 @@ async def run_scan_v2():
             ladder_cross_dedup = dedup["ladder_3"] | dedup["ladder_5"]
 
             # ── Scan each city × day (always — use cache between windows) ─
-            utc_today = datetime.now(timezone.utc).date()
             cities_scanned = set()
 
             for city_cfg in CITIES:
@@ -404,8 +403,14 @@ async def run_scan_v2():
                 is_celsius = city_cfg.get("celsius", False)
                 tz_name = city_cfg.get("timezone", "UTC")
 
+                # Compute today in the city's local timezone — the ensemble API
+                # returns dates in local time (timezone=auto), so target_date must
+                # align with that. Using UTC date causes day+1 overshoot for US
+                # cities during early-morning UTC hours (00:00-08:00 UTC).
+                local_today = datetime.now(ZoneInfo(tz_name)).date()
+
                 for day_offset in [0, 1]:
-                    target_date = (utc_today + timedelta(days=day_offset)).isoformat()
+                    target_date = (local_today + timedelta(days=day_offset)).isoformat()
 
                     # ── Noon local-time guard (day+0 only) ───────────────
                     if day_offset == 0:
