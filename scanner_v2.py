@@ -439,9 +439,9 @@ async def run_scan_v2():
                         try:
                             ensemble_result = await fetch_ensemble_members(
                                 lat=lat, lon=lon,
-                                models=["gfs_seamless", "ecmwf_ifs025"],
+                                
                                 forecast_days=2,
-                                timezone=tz_name,
+                                celsius=is_celsius,
                             )
                         except Exception as e:
                             log(f"Ensemble fetch failed {city}/{target_date}: {e}", "WARN")
