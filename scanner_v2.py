@@ -419,7 +419,7 @@ async def run_scan_v2():
 
                     # ── Step 1: Discover markets ─────────────────────────
                     try:
-                        buckets = await adapter.discover_markets(city_cfg, target_date)
+                        buckets = await adapter.discover_markets(city, target_date)
                     except Exception as e:
                         log(f"Market discovery failed {city}/{target_date}: {e}", "WARN")
                         scan_result["errors"].append(f"Discovery {city}/{target_date}: {e}")
