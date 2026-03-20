@@ -242,8 +242,16 @@ def _get_adapter():
 # ── Settlement ───────────────────────────────────────────────────────────────
 
 async def _settle_v2_trades(session, log_fn):
-    """Settle all open v2 trades where the market has resolved."""
-    from data.polymarket import check_event_resolution
+    """
+    Settle all open v2 trades where the market has resolved.
+
+    Settlement ownership goes through the venue adapter (check_settlement),
+    NOT through raw check_event_resolution() calls. This ensures:
+    - Correct key mapping (winning_label, not winning_bucket_label)
+    - Event closure gate (nested-market closed flag)
+    - Single settlement path for all venues (Polymarket now, Kalshi future)
+    """
+    adapter = _get_adapter()
 
     all_open = await get_open_positions(session)
     v2_open = [t for t in all_open if t.strategy in V2_STRATEGIES]
@@ -259,62 +267,106 @@ async def _settle_v2_trades(session, log_fn):
     for strat in V2_STRATEGIES:
         bankrolls[strat] = await get_bankroll(session, strat)
 
+    # Group trades by (city, market_date) to avoid redundant resolution checks.
+    # All trades for the same city-date share the same resolution result.
+    trades_by_market = defaultdict(list)
     for trade in v2_open:
+        key = (trade.city, trade.market_date or "")
+        trades_by_market[key].append(trade)
+
+    from data.polymarket import build_slug as _build_slug
+
+    for (city, market_date_str), trades in trades_by_market.items():
         # Skip future-dated trades
-        if trade.market_date:
+        if market_date_str:
             try:
-                trade_date = datetime.strptime(trade.market_date, "%Y-%m-%d").date()
+                trade_date = datetime.strptime(market_date_str, "%Y-%m-%d").date()
             except Exception:
                 trade_date = today
         else:
-            trade_date = trade.opened_at.date() if trade.opened_at else today
+            trade_date = today
 
         if trade_date > today:
             continue
 
-        # Check resolution
+        # Build event slug for log traceability
+        slug = _build_slug(city, trade_date) or f"{city}/{market_date_str}"
+
+        # Check resolution via adapter (uses nested-market closed gate + correct key)
         try:
-            resolution = await check_event_resolution(
-                city=trade.city,
-                market_date_str=trade.market_date or trade_date.isoformat(),
+            result = await adapter.check_settlement(
+                city=city,
+                market_date_str=market_date_str or trade_date.isoformat(),
             )
         except Exception as e:
-            log_fn(f"Settlement check failed {trade.city}/{trade.market_date}: {e}", "WARN")
+            log_fn(f"Settlement check failed {city}/{market_date_str} slug={slug}: {e}", "WARN")
             continue
 
-        if resolution is None or not resolution.get("resolved", False):
+        if result is None or not result.resolved:
             if trade_date < today:
-                log_fn(f"STALE? [{trade.strategy}] {trade.city} {trade.bucket_label} | Date={trade_date}", "WARN")
+                log_fn(f"STALE? {city}/{market_date_str} slug={slug} | {len(trades)} open trades | Not yet resolved", "WARN")
             continue
 
-        # Extract winning bucket label from resolution
-        winning_label = resolution.get("winning_bucket_label")
+        # Extract winning label from SettlementResult (adapter already maps correct key)
+        winning_label = result.winning_label
+
         if not winning_label:
-            # Try to reconstruct from low/high
-            wb_low = resolution.get("winning_bucket_low")
-            wb_high = resolution.get("winning_bucket_high")
-            if wb_low is not None and wb_high is not None:
-                winning_label = f"{int(wb_low)}-{int(wb_high)}°F"
-            elif wb_low is not None:
-                winning_label = f"{int(wb_low)}"
-
-        # Get actual high for logging
-        actual_high = resolution.get("estimated_high")
-
-        bs = bankrolls.get(trade.strategy)
-        if not bs:
+            # winning_label should always be populated when resolved=True.
+            # If it's missing, something unexpected happened — skip, don't guess.
+            logger.warning(
+                f"[SETTLE] No winning_label from adapter for {city}/{market_date_str} slug={slug}. "
+                f"resolved={result.resolved} estimated_high={result.estimated_high}. "
+                f"Skipping {len(trades)} trades."
+            )
             continue
 
-        result = await settle_v2_trade(
-            session=session,
-            trade=trade,
-            bankroll_state=bs,
-            winning_bucket_label=winning_label,
-            actual_high=actual_high,
+        # NOTE: actual_high is a bucket-derived ESTIMATE, not an observed temperature.
+        # For bounded ranges it's the midpoint (e.g. 86-87°F → 86.5).
+        # For open-upper tails it's low + 2.0 (e.g. 56°F or higher → 58.0).
+        # For single-degree Celsius it's the value itself (e.g. 18°C → 18.0).
+        # Do NOT treat this as a verified Wunderground reading.
+        actual_high = result.estimated_high
+
+        log_fn(
+            f"RESOLVED {city}/{market_date_str} | slug={slug} | "
+            f"Winner='{winning_label}' | EstHigh={actual_high} | "
+            f"Settling {len(trades)} trades"
         )
-        settled_count += 1
-        log_fn(f"SETTLED [{trade.strategy}] {trade.city} {trade.bucket_label} {trade.direction} | "
-               f"{result['status']} | Net=${result['net_pnl']:+.2f}")
+
+        # Settle each trade in this city-date group
+        for trade in trades:
+            bs = bankrolls.get(trade.strategy)
+            if not bs:
+                continue
+
+            # Rich settlement debug logging (per ChatGPT review request)
+            will_match = (trade.bucket_label or "") == winning_label
+            if trade.direction == "YES":
+                will_win = will_match
+            else:
+                will_win = not will_match
+
+            logger.info(
+                f"[SETTLE-DEBUG] trade_id={trade.id} city={city} slug={slug} "
+                f"strategy={trade.strategy} direction={trade.direction} "
+                f"bucket_label='{trade.bucket_label}' | "
+                f"winning_label='{winning_label}' estimated_high={actual_high} | "
+                f"label_match={will_match} expected_outcome={'WIN' if will_win else 'LOSS'}"
+            )
+
+            settle_result = await settle_v2_trade(
+                session=session,
+                trade=trade,
+                bankroll_state=bs,
+                winning_bucket_label=winning_label,
+                actual_high=actual_high,
+            )
+            settled_count += 1
+            log_fn(
+                f"SETTLED [{trade.strategy}] {trade.city} {trade.bucket_label} "
+                f"{trade.direction} | {settle_result['status']} | "
+                f"Net=${settle_result['net_pnl']:+.2f}"
+            )
 
     return settled_count
 

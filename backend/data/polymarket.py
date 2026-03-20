@@ -676,7 +676,25 @@ async def check_event_resolution(
     winning_bucket = None
     all_resolved = True
 
+    total_markets = len(nested_markets)
+    closed_count = 0
+
     for nm in nested_markets:
+        # Require the nested market to be officially closed by Polymarket
+        # before inferring resolution from prices. The event-level active/closed
+        # flags are NOT useful (both resolved and unresolved events show
+        # active=true, closed=false at event level). The nested-market closed
+        # flag is the authoritative signal — verified from Gamma API JSON.
+        # Settling late is much safer than settling early.
+        if not nm.get("closed", False):
+            all_resolved = False
+            logger.debug(
+                f"[POLY-RESOLVE] Nested market not closed for {slug} "
+                f"({closed_count}/{total_markets} closed so far)"
+            )
+            break
+        closed_count += 1
+
         label = (
             nm.get("groupItemTitle") or nm.get("question") or nm.get("title") or ""
         ).strip()
@@ -732,7 +750,8 @@ async def check_event_resolution(
     logger.info(
         f"[POLY-RESOLVE] ✓ {city}/{market_date_str} RESOLVED | "
         f"Winner: '{winning_bucket['label']}' (low={low}, high={high}) | "
-        f"Estimated high: {estimated}"
+        f"Estimated high: {estimated} | "
+        f"Markets: {closed_count}/{total_markets} closed"
     )
 
     return {
