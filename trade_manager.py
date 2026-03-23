@@ -21,20 +21,11 @@ logger = logging.getLogger(__name__)
 # Polymarket weather markets: feesEnabled=false (Spec Section 7)
 POLYMARKET_FEE_PCT = 0.0
 
-# Shared counter for ladder_id (reset per scan)
-_next_ladder_id = 1
-
 
 def reset_ladder_counter():
-    global _next_ladder_id
-    _next_ladder_id = 1
-
-
-def _get_next_ladder_id() -> int:
-    global _next_ladder_id
-    lid = _next_ladder_id
-    _next_ladder_id += 1
-    return lid
+    """No-op — kept for backward compatibility with scanner_v2.py caller.
+    Ladder IDs are now globally unique (first leg's trade.id), not per-scan counters."""
+    pass
 
 
 async def open_v2_trade(
@@ -133,12 +124,16 @@ async def open_v2_ladder(
 ) -> list[Trade]:
     """
     Open all legs of a ladder package as individual trades with shared ladder_id.
+
+    ladder_id is the DB trade.id of the first leg, guaranteeing global uniqueness.
+    This replaces the old per-scan counter which reset every scan cycle and caused
+    package grouping collisions across different city-dates.
     """
-    lid = _get_next_ladder_id()
     trades = []
 
-    for leg in ladder.legs:
-        leg.ladder_id = lid
+    for i, leg in enumerate(ladder.legs):
+        # First leg gets ladder_id=None initially; we'll backfill after flush
+        leg.ladder_id = trades[0].id if trades else None
         leg.package_cost = ladder.package_cost
         leg.package_prob = ladder.package_prob
         leg.package_edge = ladder.package_edge
@@ -153,6 +148,11 @@ async def open_v2_ladder(
             station_id=station_id,
         )
         trades.append(trade)
+
+        # After first leg is flushed and has a real DB id, use it as the ladder_id
+        if i == 0:
+            trade.ladder_id = trade.id
+            await session.flush()
 
     logger.info(
         f"[LADDER] OPEN [{ladder.strategy}] {city}/{market_date} | "
