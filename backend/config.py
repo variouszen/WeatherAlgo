@@ -112,7 +112,7 @@ LADDER_3_CONFIG = {
     "starting_bankroll": 500.0,
     # Risk limits
     "max_open_per_city_date": 1,
-    "max_open_total": 10,
+    "max_open_total": 50,
     "max_daily_loss": 30.0,
     "max_single_city_exposure": 20.0,
 }
