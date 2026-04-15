@@ -27,7 +27,7 @@ from sqlalchemy import select
 from config import (
     CITIES, STRATEGY_BANKROLL_ID, DRY_RUN, SCAN_INTERVAL_SECONDS,
     SPECTRUM_V2_CONFIG, SNIPER_YES_CONFIG, SNIPER_NO_CONFIG,
-    LADDER_3_CONFIG, LADDER_5_CONFIG,
+    LADDER_3_CONFIG, LADDER_5_CONFIG, ACTIVE_STRATEGIES,
 )
 from models.database import AsyncSessionLocal, Trade, BankrollState, ScanLog
 
@@ -432,6 +432,12 @@ async def run_scan_v2():
                 if bs.daily_loss_today >= cap:
                     blocked_strategies.add(strat)
                     log(f"CIRCUIT BREAKER [{strat}]: Daily loss ${bs.daily_loss_today:.2f} >= cap ${cap:.2f} — BLOCKED for this scan", "WARN")
+
+            # Disable strategies not in ACTIVE_STRATEGIES (settlement still runs for all)
+            for strat in V2_STRATEGIES:
+                if strat not in ACTIVE_STRATEGIES and strat not in blocked_strategies:
+                    blocked_strategies.add(strat)
+                    log(f"DISABLED [{strat}]: not in ACTIVE_STRATEGIES")
 
             # ── Build per-strategy dedup sets ────────────────────────────
             all_open = await get_open_positions(session)

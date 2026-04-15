@@ -19,6 +19,11 @@ USER_AGENT = os.getenv("USER_AGENT", "WeatherArbBot/1.0 contact@example.com")
 # ── Paper trading ────────────────────────────────────────────────────────────
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 
+# ── Active strategies ─────────────────────────────────────────────────────────
+# Controls which strategies evaluate NEW trades. Settlement still runs for all.
+# Override in Railway env: ACTIVE_STRATEGIES=ladder_3,sniper_yes
+ACTIVE_STRATEGIES = [s.strip() for s in os.getenv("ACTIVE_STRATEGIES", "ladder_3").split(",")]
+
 # ── Ensemble config ──────────────────────────────────────────────────────────
 ENSEMBLE_MODELS = os.getenv("ENSEMBLE_MODELS", "gfs_seamless,ecmwf_ifs025")
 SCAN_SYNC_GFS_RUNS = os.getenv("SCAN_SYNC_GFS_RUNS", "true").lower() == "true"
@@ -34,7 +39,7 @@ MAX_FORECAST_DAYS = 2  # day+0 and day+1 only (day+2 removed per spec)
 
 # ── Spectrum — Native Bucket Benchmark ($500) ────────────────────────────────
 # YES + NO combined; picks best edge per bucket; $2.00 sizing;
-# one trade per city-date; 10 cities only.
+# one trade per city-date.
 SPECTRUM_V2_CONFIG = {
     # Gate thresholds
     "min_edge": 0.08,              # Gate 1: 8% minimum edge
@@ -143,7 +148,7 @@ STRATEGY_BANKROLL_ID = {
 }
 
 
-# ── Cities (10) ──────────────────────────────────────────────────────────────
+# ── Cities (25) ──────────────────────────────────────────────────────────────
 INTL_DEFAULT_MODEL = "icon_seamless"
 INTL_DEFAULT_LABEL = "ICON"
 
@@ -159,8 +164,29 @@ CITIES = [
     {"name": "London",        "lat": 51.5033,  "lon": 0.0550,    "station": "EGLC", "emoji": "🎡",  "celsius": True, "timezone": "Europe/London"},
     {"name": "Paris",         "lat": 48.8566,  "lon": 2.3522,    "station": "LFPG", "emoji": "🗼",  "celsius": True, "timezone": "Europe/Paris"},
     {"name": "Munich",        "lat": 48.1351,  "lon": 11.5820,   "station": "EDDM", "emoji": "🍺",  "celsius": True, "timezone": "Europe/Berlin"},
-    # ── East Asia (1) ────────────────────────────────────────────────────
+    # ── East Asia (1 → 5) ────────────────────────────────────────────────
     {"name": "Tokyo",         "lat": 35.5494,  "lon": 139.7798,  "station": "RJTT", "emoji": "🏯",  "celsius": True, "timezone": "Asia/Tokyo",     "primary_model": "jma_seamless", "primary_label": "JMA", "single_model": True},
+    {"name": "Seoul",         "lat": 37.5665,  "lon": 126.9780,  "station": "RKSS", "emoji": "🇰🇷", "celsius": True, "timezone": "Asia/Seoul"},
+    {"name": "Shanghai",      "lat": 31.2304,  "lon": 121.4737,  "station": "ZSSS", "emoji": "🏙️", "celsius": True, "timezone": "Asia/Shanghai"},
+    {"name": "Taipei",        "lat": 25.0330,  "lon": 121.5654,  "station": "RCSS", "emoji": "🇹🇼", "celsius": True, "timezone": "Asia/Taipei"},
+    {"name": "Hong Kong",     "lat": 22.3193,  "lon": 114.1694,  "station": "VHHH", "emoji": "🇭🇰", "celsius": True, "timezone": "Asia/Hong_Kong"},
+    # ── South / Southeast Asia (2) ───────────────────────────────────────
+    {"name": "Singapore",     "lat": 1.3521,   "lon": 103.8198,  "station": "WSSS", "emoji": "🇸🇬", "celsius": True, "timezone": "Asia/Singapore"},
+    {"name": "Lucknow",       "lat": 26.8467,  "lon": 80.9462,   "station": "VILK", "emoji": "🇮🇳", "celsius": True, "timezone": "Asia/Kolkata"},
+    # ── Middle East (1) ──────────────────────────────────────────────────
+    {"name": "Tel Aviv",      "lat": 32.0853,  "lon": 34.7818,   "station": "LLBG", "emoji": "🇮🇱", "celsius": True, "timezone": "Asia/Jerusalem"},
+    # ── Europe (3 → 7) ───────────────────────────────────────────────────
+    {"name": "Madrid",        "lat": 40.4168,  "lon": -3.7038,   "station": "LEMD", "emoji": "🇪🇸", "celsius": True, "timezone": "Europe/Madrid"},
+    {"name": "Milan",         "lat": 45.4642,  "lon": 9.1900,    "station": "LIML", "emoji": "🇮🇹", "celsius": True, "timezone": "Europe/Rome"},
+    {"name": "Warsaw",        "lat": 52.2297,  "lon": 21.0122,   "station": "EPWA", "emoji": "🇵🇱", "celsius": True, "timezone": "Europe/Warsaw"},
+    {"name": "Ankara",        "lat": 39.9334,  "lon": 32.8597,   "station": "LTAC", "emoji": "🇹🇷", "celsius": True, "timezone": "Europe/Istanbul"},
+    # ── Canada (1) ───────────────────────────────────────────────────────
+    {"name": "Toronto",       "lat": 43.6532,  "lon": -79.3832,  "station": "CYYZ", "emoji": "🇨🇦", "celsius": True, "timezone": "America/Toronto"},
+    # ── South America (2) ────────────────────────────────────────────────
+    {"name": "Buenos Aires",  "lat": -34.6037, "lon": -58.3816,  "station": "SABE", "emoji": "🇦🇷", "celsius": True, "timezone": "America/Argentina/Buenos_Aires"},
+    {"name": "Sao Paulo",     "lat": -23.5505, "lon": -46.6333,  "station": "SBSP", "emoji": "🇧🇷", "celsius": True, "timezone": "America/Sao_Paulo"},
+    # ── Oceania (1) ──────────────────────────────────────────────────────
+    {"name": "Wellington",    "lat": -41.2924, "lon": 174.7787,  "station": "NZWN", "emoji": "🇳🇿", "celsius": True, "timezone": "Pacific/Auckland"},
 ]
 
 # ── Model tier mapping ────────────────────────────────────────────────────────

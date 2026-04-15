@@ -47,6 +47,19 @@ CITY_SLUGS: dict[str, str] = {
     "Seoul":        "seoul",
     "Tokyo":        "tokyo",
     "Shanghai":     "shanghai",
+    "Taipei":       "taipei",
+    "Hong Kong":    "hong-kong",
+    "Singapore":    "singapore",
+    "Lucknow":      "lucknow",
+    "Tel Aviv":     "tel-aviv",
+    "Madrid":       "madrid",
+    "Milan":        "milan",
+    "Warsaw":       "warsaw",
+    "Ankara":       "ankara",
+    "Toronto":      "toronto",
+    "Buenos Aires": "buenos-aires",
+    "Sao Paulo":    "sao-paulo",
+    "Wellington":   "wellington",
 }
 
 CITY_TITLE_TOKENS: dict[str, list[str]] = {
@@ -62,9 +75,27 @@ CITY_TITLE_TOKENS: dict[str, list[str]] = {
     "Seoul":        ["seoul"],
     "Tokyo":        ["tokyo"],
     "Shanghai":     ["shanghai"],
+    "Taipei":       ["taipei"],
+    "Hong Kong":    ["hong kong"],
+    "Singapore":    ["singapore"],
+    "Lucknow":      ["lucknow"],
+    "Tel Aviv":     ["tel aviv"],
+    "Madrid":       ["madrid"],
+    "Milan":        ["milan"],
+    "Warsaw":       ["warsaw"],
+    "Ankara":       ["ankara"],
+    "Toronto":      ["toronto"],
+    "Buenos Aires": ["buenos aires"],
+    "Sao Paulo":    ["sao paulo"],
+    "Wellington":   ["wellington"],
 }
 
-CITY_CELSIUS: set[str] = {"London", "Paris", "Munich", "Seoul", "Tokyo", "Shanghai"}
+CITY_CELSIUS: set[str] = {
+    "London", "Paris", "Munich", "Seoul", "Tokyo", "Shanghai",
+    "Taipei", "Hong Kong", "Singapore", "Lucknow", "Tel Aviv",
+    "Madrid", "Milan", "Warsaw", "Ankara", "Toronto",
+    "Buenos Aires", "Sao Paulo", "Wellington",
+}
 
 SLIPPAGE_HAIRCUT = 0.02
 MIN_VALID_BUCKETS = 3
