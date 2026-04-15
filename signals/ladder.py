@@ -14,7 +14,9 @@ Gate order (Spec Section 3D):
   1. Minimum package edge >= 0.15
   2. Minimum package prob >= 0.60
   3. Maximum package cost <= $10.00
+  3b. Minimum package cost >= $1.00
   4. All buckets fillable (each passes fill simulation independently)
+     — Per-leg minimum ask price >= $0.03 (rejects penny buckets)
   5. No internal gaps (all buckets contiguous)
   6. Multi-model agreement: peak within 2 buckets between models
   7. City-date dedup: no existing Ladder on this city-date
@@ -105,6 +107,8 @@ async def evaluate_ladder(
     min_package_edge = config.get("min_package_edge", 0.15)
     min_package_prob = config.get("min_package_prob", 0.60)
     max_package_cost = config.get("max_package_cost", 10.00)
+    min_package_cost = config.get("min_package_cost", 1.00)
+    min_leg_ask = config.get("min_leg_ask", 0.03)
     shares_per_bucket = config.get("shares_per_bucket", SHARES_PER_BUCKET)
 
     # ── Gate 8: Bankroll floor (check early, refined after cost calc) ────
@@ -163,6 +167,18 @@ async def evaluate_ladder(
             continue
 
         ask_price = _safe_float(bkt.ask_price)
+
+        # Gate: Per-leg minimum ask price — reject penny buckets
+        if ask_price < min_leg_ask:
+            leg_fills.append({
+                "bucket": bkt,
+                "abs_index": abs_index,
+                "fill": None,
+                "offset": offset,
+            })
+            unfillable_indices.append(offset)
+            continue
+
         target_spend = shares_per_bucket * ask_price if ask_price > 0 else 0.0
 
         if target_spend <= 0:
@@ -289,6 +305,10 @@ async def evaluate_ladder(
 
     # ── Gate 3: Maximum package cost ─────────────────────────────────────
     if package_cost > max_package_cost:
+        return None
+
+    # ── Gate 3b: Minimum package cost ────────────────────────────────────
+    if package_cost < min_package_cost:
         return None
 
     # ── Gate 8 (refined): Bankroll >= package_cost ───────────────────────

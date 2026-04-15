@@ -106,6 +106,8 @@ LADDER_3_CONFIG = {
     "min_package_edge": 0.15,      # Gate 1: 15% return on capital
     "min_package_prob": 0.60,      # Gate 2: 60% package probability
     "max_package_cost": 10.00,     # Gate 3: $10 max package cost
+    "min_package_cost": 1.00,      # Gate 3b: $1 min package cost (blocks penny packages)
+    "min_leg_ask": 0.03,           # Gate 4: $0.03 min per-leg ask (blocks penny buckets)
     "shares_per_bucket": 10,       # 10 shares per leg
     # Bankroll
     "bankroll_id": 6,
@@ -124,6 +126,8 @@ LADDER_5_CONFIG = {
     "min_package_edge": 0.15,
     "min_package_prob": 0.60,
     "max_package_cost": 10.00,
+    "min_package_cost": 1.00,
+    "min_leg_ask": 0.03,
     "shares_per_bucket": 10,
     # Bankroll
     "bankroll_id": 7,
