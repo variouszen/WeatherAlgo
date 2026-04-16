@@ -157,40 +157,39 @@ INTL_DEFAULT_MODEL = "icon_seamless"
 INTL_DEFAULT_LABEL = "ICON"
 
 CITIES = [
-    # ── US (6) ───────────────────────────────────────────────────────────
-    {"name": "New York",      "lat": 40.7128,  "lon": -74.0060,  "station": "KLGA", "emoji": "🗽",  "celsius": False, "timezone": "America/New_York"},
-    {"name": "Chicago",       "lat": 41.8781,  "lon": -87.6298,  "station": "KORD", "emoji": "🌬️", "celsius": False, "timezone": "America/Chicago"},
-    {"name": "Seattle",       "lat": 47.6062,  "lon": -122.3321, "station": "KSEA", "emoji": "🌧️", "celsius": False, "timezone": "America/Los_Angeles"},
+    # ── US (6) — coordinates matched to Polymarket resolution stations ───
+    {"name": "New York",      "lat": 40.7772,  "lon": -73.8726,  "station": "KLGA", "emoji": "🗽",  "celsius": False, "timezone": "America/New_York"},
+    {"name": "Chicago",       "lat": 41.9742,  "lon": -87.9073,  "station": "KORD", "emoji": "🌬️", "celsius": False, "timezone": "America/Chicago"},
+    {"name": "Seattle",       "lat": 47.4499,  "lon": -122.3118, "station": "KSEA", "emoji": "🌧️", "celsius": False, "timezone": "America/Los_Angeles"},
     {"name": "Atlanta",       "lat": 33.6367,  "lon": -84.4279,  "station": "KATL", "emoji": "🍑",  "celsius": False, "timezone": "America/New_York"},
-    {"name": "Dallas",        "lat": 32.8471,  "lon": -96.8518,  "station": "KDAL", "emoji": "🤠",  "celsius": False, "timezone": "America/Chicago"},
-    {"name": "Miami",         "lat": 25.7617,  "lon": -80.1918,  "station": "KMIA", "emoji": "🌴",  "celsius": False, "timezone": "America/New_York"},
-    # ── Europe (3) ───────────────────────────────────────────────────────
-    {"name": "London",        "lat": 51.5033,  "lon": 0.0550,    "station": "EGLC", "emoji": "🎡",  "celsius": True, "timezone": "Europe/London"},
-    {"name": "Paris",         "lat": 48.8566,  "lon": 2.3522,    "station": "LFPG", "emoji": "🗼",  "celsius": True, "timezone": "Europe/Paris"},
-    {"name": "Munich",        "lat": 48.1351,  "lon": 11.5820,   "station": "EDDM", "emoji": "🍺",  "celsius": True, "timezone": "Europe/Berlin"},
-    # ── East Asia (1 → 5) ────────────────────────────────────────────────
+    {"name": "Dallas",        "lat": 32.8459,  "lon": -96.8509,  "station": "KDAL", "emoji": "🤠",  "celsius": False, "timezone": "America/Chicago"},
+    {"name": "Miami",         "lat": 25.7954,  "lon": -80.2901,  "station": "KMIA", "emoji": "🌴",  "celsius": False, "timezone": "America/New_York"},
+    # ── Europe (7) ───────────────────────────────────────────────────────
+    {"name": "London",        "lat": 51.5053,  "lon": 0.0553,    "station": "EGLC", "emoji": "🎡",  "celsius": True, "timezone": "Europe/London"},
+    {"name": "Paris",         "lat": 49.0097,  "lon": 2.5479,    "station": "LFPG", "emoji": "🗼",  "celsius": True, "timezone": "Europe/Paris"},
+    {"name": "Munich",        "lat": 48.3538,  "lon": 11.7861,   "station": "EDDM", "emoji": "🍺",  "celsius": True, "timezone": "Europe/Berlin"},
+    {"name": "Madrid",        "lat": 40.4934,  "lon": -3.5722,   "station": "LEMD", "emoji": "🇪🇸", "celsius": True, "timezone": "Europe/Madrid"},
+    {"name": "Milan",         "lat": 45.6306,  "lon": 8.7281,    "station": "LIMC", "emoji": "🇮🇹", "celsius": True, "timezone": "Europe/Rome"},
+    {"name": "Warsaw",        "lat": 52.1657,  "lon": 20.9671,   "station": "EPWA", "emoji": "🇵🇱", "celsius": True, "timezone": "Europe/Warsaw"},
+    {"name": "Ankara",        "lat": 40.1281,  "lon": 32.9951,   "station": "LTAC", "emoji": "🇹🇷", "celsius": True, "timezone": "Europe/Istanbul"},
+    # ── East Asia (5) ────────────────────────────────────────────────────
     {"name": "Tokyo",         "lat": 35.5494,  "lon": 139.7798,  "station": "RJTT", "emoji": "🏯",  "celsius": True, "timezone": "Asia/Tokyo",     "primary_model": "jma_seamless", "primary_label": "JMA", "single_model": True},
-    {"name": "Seoul",         "lat": 37.5665,  "lon": 126.9780,  "station": "RKSS", "emoji": "🇰🇷", "celsius": True, "timezone": "Asia/Seoul"},
-    {"name": "Shanghai",      "lat": 31.2304,  "lon": 121.4737,  "station": "ZSSS", "emoji": "🏙️", "celsius": True, "timezone": "Asia/Shanghai"},
-    {"name": "Taipei",        "lat": 25.0330,  "lon": 121.5654,  "station": "RCSS", "emoji": "🇹🇼", "celsius": True, "timezone": "Asia/Taipei"},
-    {"name": "Hong Kong",     "lat": 22.3193,  "lon": 114.1694,  "station": "VHHH", "emoji": "🇭🇰", "celsius": True, "timezone": "Asia/Hong_Kong"},
+    {"name": "Seoul",         "lat": 37.4691,  "lon": 126.4510,  "station": "RKSI", "emoji": "🇰🇷", "celsius": True, "timezone": "Asia/Seoul"},
+    {"name": "Shanghai",      "lat": 31.1434,  "lon": 121.8050,  "station": "ZSPD", "emoji": "🏙️", "celsius": True, "timezone": "Asia/Shanghai"},
+    {"name": "Taipei",        "lat": 25.0697,  "lon": 121.5525,  "station": "RCSS", "emoji": "🇹🇼", "celsius": True, "timezone": "Asia/Taipei"},
+    {"name": "Hong Kong",     "lat": 22.3019,  "lon": 114.1742,  "station": "HKO",  "emoji": "🇭🇰", "celsius": True, "timezone": "Asia/Hong_Kong"},
     # ── South / Southeast Asia (2) ───────────────────────────────────────
-    {"name": "Singapore",     "lat": 1.3521,   "lon": 103.8198,  "station": "WSSS", "emoji": "🇸🇬", "celsius": True, "timezone": "Asia/Singapore"},
-    {"name": "Lucknow",       "lat": 26.8467,  "lon": 80.9462,   "station": "VILK", "emoji": "🇮🇳", "celsius": True, "timezone": "Asia/Kolkata"},
+    {"name": "Singapore",     "lat": 1.3502,   "lon": 103.9940,  "station": "WSSS", "emoji": "🇸🇬", "celsius": True, "timezone": "Asia/Singapore"},
+    {"name": "Lucknow",       "lat": 26.7606,  "lon": 80.8893,   "station": "VILK", "emoji": "🇮🇳", "celsius": True, "timezone": "Asia/Kolkata"},
     # ── Middle East (1) ──────────────────────────────────────────────────
-    {"name": "Tel Aviv",      "lat": 32.0853,  "lon": 34.7818,   "station": "LLBG", "emoji": "🇮🇱", "celsius": True, "timezone": "Asia/Jerusalem"},
-    # ── Europe (3 → 7) ───────────────────────────────────────────────────
-    {"name": "Madrid",        "lat": 40.4168,  "lon": -3.7038,   "station": "LEMD", "emoji": "🇪🇸", "celsius": True, "timezone": "Europe/Madrid"},
-    {"name": "Milan",         "lat": 45.4642,  "lon": 9.1900,    "station": "LIML", "emoji": "🇮🇹", "celsius": True, "timezone": "Europe/Rome"},
-    {"name": "Warsaw",        "lat": 52.2297,  "lon": 21.0122,   "station": "EPWA", "emoji": "🇵🇱", "celsius": True, "timezone": "Europe/Warsaw"},
-    {"name": "Ankara",        "lat": 39.9334,  "lon": 32.8597,   "station": "LTAC", "emoji": "🇹🇷", "celsius": True, "timezone": "Europe/Istanbul"},
+    {"name": "Tel Aviv",      "lat": 32.0114,  "lon": 34.8867,   "station": "LLBG", "emoji": "🇮🇱", "celsius": True, "timezone": "Asia/Jerusalem"},
     # ── Canada (1) ───────────────────────────────────────────────────────
-    {"name": "Toronto",       "lat": 43.6532,  "lon": -79.3832,  "station": "CYYZ", "emoji": "🇨🇦", "celsius": True, "timezone": "America/Toronto"},
+    {"name": "Toronto",       "lat": 43.6772,  "lon": -79.6306,  "station": "CYYZ", "emoji": "🇨🇦", "celsius": True, "timezone": "America/Toronto"},
     # ── South America (2) ────────────────────────────────────────────────
-    {"name": "Buenos Aires",  "lat": -34.6037, "lon": -58.3816,  "station": "SABE", "emoji": "🇦🇷", "celsius": True, "timezone": "America/Argentina/Buenos_Aires"},
-    {"name": "Sao Paulo",     "lat": -23.5505, "lon": -46.6333,  "station": "SBSP", "emoji": "🇧🇷", "celsius": True, "timezone": "America/Sao_Paulo"},
+    {"name": "Buenos Aires",  "lat": -34.8222, "lon": -58.5358,  "station": "SAEZ", "emoji": "🇦🇷", "celsius": True, "timezone": "America/Argentina/Buenos_Aires"},
+    {"name": "Sao Paulo",     "lat": -23.4313, "lon": -46.4700,  "station": "SBGR", "emoji": "🇧🇷", "celsius": True, "timezone": "America/Sao_Paulo"},
     # ── Oceania (1) ──────────────────────────────────────────────────────
-    {"name": "Wellington",    "lat": -41.2924, "lon": 174.7787,  "station": "NZWN", "emoji": "🇳🇿", "celsius": True, "timezone": "Pacific/Auckland"},
+    {"name": "Wellington",    "lat": -41.3272, "lon": 174.8053,  "station": "NZWN", "emoji": "🇳🇿", "celsius": True, "timezone": "Pacific/Auckland"},
 ]
 
 # ── Model tier mapping ────────────────────────────────────────────────────────
