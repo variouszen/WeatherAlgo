@@ -822,3 +822,186 @@ async def debug_markets():
                 results[city] = {"status": "not_found", "slug": slug, "rejection": rejection}
     found = sum(1 for v in results.values() if v["status"] == "found")
     return {"utc_now": datetime.now(timezone.utc).isoformat(), "cities_found": found, "results": results}
+
+
+# ── City Bias Analysis ──────────────────────────────────────────────────────
+
+import re
+
+def _parse_bucket_temp(label: str) -> tuple[float, str]:
+    """
+    Parse a bucket label into (temperature_midpoint, unit).
+    Examples:
+      "20°C" → (20.0, "C")
+      "82-83°F" → (82.5, "F")
+      "20°C or higher" → (20.0, "C")
+      "45°F or below" → (45.0, "F")
+    """
+    label = label.strip()
+    unit = "C" if "°C" in label or "C" in label.upper() else "F"
+
+    # Range: "82-83°F" or "82-83"
+    m = re.match(r"(-?\d+)\s*[-–]\s*(-?\d+)", label)
+    if m:
+        return (float(m.group(1)) + float(m.group(2))) / 2, unit
+
+    # Single: "20°C" or "20°C or higher" or "45°F or below"
+    m = re.match(r"(-?\d+)", label)
+    if m:
+        return float(m.group(1)), unit
+
+    return 0.0, unit
+
+
+@app.get("/api/v2/city-bias")
+async def get_city_bias():
+    """
+    Per-city bias analysis from settled Ladder packages.
+    Shows how often and in which direction the ensemble misses per city.
+    """
+    async with AsyncSessionLocal() as session:
+        q = (
+            select(Trade)
+            .where(Trade.strategy.in_(["ladder_3", "ladder_5"]))
+            .where(Trade.ladder_id.isnot(None))
+            .where(Trade.status.in_(["WIN", "LOSS"]))
+            .order_by(Trade.opened_at)
+        )
+        result = await session.execute(q)
+        all_trades = result.scalars().all()
+
+    # Group into packages
+    packages = {}
+    for t in all_trades:
+        key = (t.city, t.strategy, t.ladder_id)
+        if key not in packages:
+            packages[key] = {"legs": [], "city": t.city, "market_date": t.market_date}
+        packages[key]["legs"].append(t)
+
+    # Per-city stats
+    city_stats = {}
+
+    for key, pkg in packages.items():
+        city = pkg["city"]
+        legs = pkg["legs"]
+
+        # All legs must be settled
+        if any(l.status not in ("WIN", "LOSS") for l in legs):
+            continue
+
+        # Get actual temperature from any leg (all share the same actual_high_f)
+        actual = None
+        for l in legs:
+            if l.actual_high_f is not None:
+                actual = l.actual_high_f
+                break
+        if actual is None:
+            continue
+
+        # Parse bucket labels to find package range
+        bucket_temps = []
+        unit = "F"
+        for l in legs:
+            if l.bucket_label:
+                temp, u = _parse_bucket_temp(l.bucket_label)
+                bucket_temps.append(temp)
+                unit = u
+
+        if not bucket_temps:
+            continue
+
+        # Package center = midpoint of min and max bucket temps
+        pkg_low = min(bucket_temps)
+        pkg_high = max(bucket_temps)
+        pkg_center = (pkg_low + pkg_high) / 2
+
+        # Collect individual leg labels and find winning bucket
+        leg_labels = [l.bucket_label for l in legs if l.bucket_label]
+        winning_leg = next((l for l in legs if l.status == "WIN"), None)
+        winning_bucket = winning_leg.bucket_label if winning_leg else f"{actual:.0f}°{unit} (outside package)"
+
+        # Miss = actual - center (positive = actual was warmer)
+        miss = actual - pkg_center
+
+        # Did package win?
+        won = any(l.status == "WIN" for l in legs)
+        total_pnl = sum(l.net_pnl or 0 for l in legs)
+
+        # Accumulate per city
+        if city not in city_stats:
+            city_stats[city] = {
+                "city": city,
+                "unit": unit,
+                "packages": 0,
+                "wins": 0,
+                "losses": 0,
+                "total_pnl": 0.0,
+                "miss_warm": 0,
+                "miss_cold": 0,
+                "miss_hit": 0,
+                "miss_values": [],
+                "results": [],
+            }
+
+        cs = city_stats[city]
+        cs["packages"] += 1
+        cs["wins"] += 1 if won else 0
+        cs["losses"] += 0 if won else 1
+        cs["total_pnl"] = round(cs["total_pnl"] + total_pnl, 2)
+        cs["miss_values"].append(miss)
+
+        if miss > 0.5:
+            cs["miss_warm"] += 1
+        elif miss < -0.5:
+            cs["miss_cold"] += 1
+        else:
+            cs["miss_hit"] += 1
+
+        cs["results"].append({
+            "date": pkg["market_date"],
+            "package_buckets": leg_labels,
+            "package_range": f"{pkg_low:.0f}-{pkg_high:.0f}°{unit}",
+            "winning_bucket": winning_bucket,
+            "actual": actual,
+            "miss": round(miss, 1),
+            "direction": "warm" if miss > 0.5 else ("cold" if miss < -0.5 else "hit"),
+            "won": won,
+            "pnl": round(total_pnl, 2),
+        })
+
+    # Build summary
+    summary = []
+    for city, cs in sorted(city_stats.items(), key=lambda x: x[1]["packages"], reverse=True):
+        misses = cs["miss_values"]
+        avg_miss = sum(misses) / len(misses) if misses else 0
+        summary.append({
+            "city": cs["city"],
+            "unit": cs["unit"],
+            "packages": cs["packages"],
+            "wins": cs["wins"],
+            "losses": cs["losses"],
+            "win_rate": round(cs["wins"] / cs["packages"] * 100, 1) if cs["packages"] else 0,
+            "total_pnl": cs["total_pnl"],
+            "avg_miss": round(avg_miss, 1),
+            "miss_direction": "warm" if avg_miss > 0.3 else ("cold" if avg_miss < -0.3 else "neutral"),
+            "miss_warm_count": cs["miss_warm"],
+            "miss_cold_count": cs["miss_cold"],
+            "miss_hit_count": cs["miss_hit"],
+            "results": cs["results"],
+        })
+
+    total_pkgs = sum(c["packages"] for c in summary)
+    total_wins = sum(c["wins"] for c in summary)
+    total_pnl = sum(c["total_pnl"] for c in summary)
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "overall": {
+            "total_packages": total_pkgs,
+            "total_wins": total_wins,
+            "total_losses": total_pkgs - total_wins,
+            "win_rate": round(total_wins / total_pkgs * 100, 1) if total_pkgs else 0,
+            "total_pnl": round(total_pnl, 2),
+        },
+        "cities": summary,
+    }
