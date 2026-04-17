@@ -112,6 +112,22 @@ tbody tr:hover { background: var(--surface2); }
     </div>
   </div>
 
+  <!-- City Bias Analysis -->
+  <div class="section">
+    <div class="section-title">City Bias Analysis</div>
+    <div class="section-sub">Ensemble miss direction per city. Positive avg miss = ensemble predicts too cold (actual warmer). Based on settled Ladder packages only.</div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>City</th><th>Packages</th><th>Wins</th><th>Win Rate</th>
+          <th>Avg Miss</th><th>Direction</th><th>Warm</th><th>Cold</th><th>Hit</th><th>PnL</th>
+        </tr></thead>
+        <tbody id="biasBody"><tr><td colspan="10" style="text-align:center;color:var(--text2)">Loading...</td></tr></tbody>
+      </table>
+    </div>
+    <div id="biasDetail" style="margin-top:16px"></div>
+  </div>
+
   <!-- Ladder Packages -->
   <div class="section">
     <div class="section-title">Ladder Packages</div>
@@ -131,13 +147,14 @@ let scChart=null;
 
 async function load(){
   try{
-    const [statsR,compR]=await Promise.all([fetch('/api/v2/stats'),fetch('/api/v2/comparison')]);
-    const stats=await statsR.json(), comp=await compR.json();
+    const [statsR,compR,biasR]=await Promise.all([fetch('/api/v2/stats'),fetch('/api/v2/comparison'),fetch('/api/v2/city-bias')]);
+    const stats=await statsR.json(), comp=await compR.json(), bias=await biasR.json();
     renderComp(stats);
     renderScatter(comp.scatter||[]);
     renderFill(stats);
     renderCity(comp.city_stats||[]);
     renderPkgs(comp.ladder_packages||[]);
+    renderBias(bias);
   }catch(e){console.error('Analysis load:',e);}
 }
 
@@ -258,6 +275,57 @@ function renderPkgs(pkgs){
       <div style="font-size:12px;color:var(--text2);margin-bottom:6px">Cost: ${fmt$(pkg.package_cost)} | Prob: ${pkg.package_prob?(pkg.package_prob*100).toFixed(1)+'%':'—'} | Edge: ${pkg.package_edge?(pkg.package_edge*100).toFixed(1)+'%':'—'} | Legs: ${pkg.num_legs||pkg.legs?.length||'?'}</div>
       <div class="pkg-legs">${legs}</div></div>`;
   }).join('');
+}
+
+function renderBias(bias){
+  const cities=bias.cities||[];
+  if(!cities.length){
+    document.getElementById('biasBody').innerHTML='<tr><td colspan="10" style="text-align:center;color:var(--text2)">No settled packages yet</td></tr>';
+    document.getElementById('biasDetail').innerHTML='';
+    return;
+  }
+  // Summary table
+  cities.sort((a,b)=>b.packages-a.packages);
+  document.getElementById('biasBody').innerHTML=cities.map(c=>{
+    const dirColor=c.miss_direction==='warm'?'var(--red)':c.miss_direction==='cold'?'var(--blue)':'var(--green)';
+    const dirLabel=c.miss_direction==='warm'?'🔥 Warm':c.miss_direction==='cold'?'❄ Cold':'✓ Neutral';
+    const missSign=c.avg_miss>0?'+':'';
+    return`<tr>
+      <td style="font-weight:500">${c.city}</td>
+      <td>${c.packages}</td><td>${c.wins}</td>
+      <td>${fP(c.win_rate)}</td>
+      <td style="color:${dirColor};font-weight:600">${missSign}${c.avg_miss}°${c.unit}</td>
+      <td style="color:${dirColor}">${dirLabel}</td>
+      <td style="color:var(--red)">${c.miss_warm_count}</td>
+      <td style="color:var(--blue)">${c.miss_cold_count}</td>
+      <td style="color:var(--green)">${c.miss_hit_count}</td>
+      <td class="${pc(c.total_pnl)}">${fmt$(c.total_pnl)}</td></tr>`;
+  }).join('');
+
+  // Detail: per-city settled package results
+  let detail='';
+  cities.forEach(c=>{
+    if(!c.results||!c.results.length)return;
+    const rows=c.results.map(r=>{
+      const dirColor=r.direction==='warm'?'var(--red)':r.direction==='cold'?'var(--blue)':'var(--green)';
+      const missSign=r.miss>0?'+':'';
+      const wonHtml=r.won?'<span style="color:var(--green)">WIN</span>':'<span style="color:var(--red)">LOSS</span>';
+      const buckets=(r.package_buckets||[]).join(', ');
+      return`<tr>
+        <td>${r.date}</td>
+        <td>${buckets||r.package_range}</td>
+        <td style="font-weight:600">${r.winning_bucket||'—'}</td>
+        <td style="color:${dirColor};font-weight:600">${missSign}${r.miss}°</td>
+        <td>${wonHtml}</td>
+        <td class="${pc(r.pnl)}">${fmt$(r.pnl)}</td></tr>`;
+    }).join('');
+    detail+=`<div class="pkg-card" style="border-left:3px solid var(--purple);margin-bottom:12px">
+      <div style="font-size:14px;font-weight:600;margin-bottom:8px">${c.city} <span style="color:var(--text2);font-weight:400;font-size:12px">— ${c.packages} packages, ${fP(c.win_rate)} win rate, avg miss ${c.avg_miss>0?'+':''}${c.avg_miss}°${c.unit} ${c.miss_direction}</span></div>
+      <table style="font-size:12px"><thead><tr>
+        <th>Date</th><th>Package Buckets</th><th>Winning Bucket</th><th>Miss</th><th>Result</th><th>PnL</th>
+      </tr></thead><tbody>${rows}</tbody></table></div>`;
+  });
+  document.getElementById('biasDetail').innerHTML=detail;
 }
 
 load();
