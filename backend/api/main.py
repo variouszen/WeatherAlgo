@@ -828,36 +828,49 @@ async def debug_markets():
 
 import re
 
-def _parse_bucket_temp(label: str) -> tuple[float, str]:
+def _parse_bucket_range(label: str) -> tuple[float, float, str]:
     """
-    Parse a bucket label into (temperature_midpoint, unit).
+    Parse a bucket label into (low, high, unit).
     Examples:
-      "20°C" → (20.0, "C")
-      "82-83°F" → (82.5, "F")
-      "20°C or higher" → (20.0, "C")
-      "45°F or below" → (45.0, "F")
+      "20°C"           → (20.0, 20.0, "C")
+      "82-83°F"        → (82.0, 83.0, "F")
+      "20°C or higher" → (20.0, 999.0, "C")
+      "45°F or below"  → (-999.0, 45.0, "F")
     """
     label = label.strip()
-    unit = "C" if "°C" in label or "C" in label.upper() else "F"
+    unit = "C" if "°C" in label else "F"
 
-    # Range: "82-83°F" or "82-83"
+    # Range: "82-83°F"
     m = re.match(r"(-?\d+)\s*[-–]\s*(-?\d+)", label)
     if m:
-        return (float(m.group(1)) + float(m.group(2))) / 2, unit
+        return float(m.group(1)), float(m.group(2)), unit
 
-    # Single: "20°C" or "20°C or higher" or "45°F or below"
+    # Tail high: "20°C or higher" / "64°F or higher"
+    if "or higher" in label.lower():
+        m = re.match(r"(-?\d+)", label)
+        if m:
+            return float(m.group(1)), 999.0, unit
+
+    # Tail low: "45°F or below"
+    if "or below" in label.lower():
+        m = re.match(r"(-?\d+)", label)
+        if m:
+            return -999.0, float(m.group(1)), unit
+
+    # Single: "20°C"
     m = re.match(r"(-?\d+)", label)
     if m:
-        return float(m.group(1)), unit
+        v = float(m.group(1))
+        return v, v, unit
 
-    return 0.0, unit
+    return 0.0, 0.0, unit
 
 
 @app.get("/api/v2/city-bias")
 async def get_city_bias():
     """
     Per-city bias analysis from settled Ladder packages.
-    Shows how often and in which direction the ensemble misses per city.
+    Measures miss from package EDGE (ceiling/floor) on losing packages only.
     """
     async with AsyncSessionLocal() as session:
         q = (
@@ -889,7 +902,7 @@ async def get_city_bias():
         if any(l.status not in ("WIN", "LOSS") for l in legs):
             continue
 
-        # Get actual temperature from any leg (all share the same actual_high_f)
+        # Get actual temperature from any leg
         actual = None
         for l in legs:
             if l.actual_high_f is not None:
@@ -898,36 +911,53 @@ async def get_city_bias():
         if actual is None:
             continue
 
-        # Parse bucket labels to find package range
-        bucket_temps = []
+        # Parse bucket labels to find package floor and ceiling
         unit = "F"
+        pkg_floor = float("inf")
+        pkg_ceiling = float("-inf")
+        leg_labels = []
         for l in legs:
             if l.bucket_label:
-                temp, u = _parse_bucket_temp(l.bucket_label)
-                bucket_temps.append(temp)
+                low, high, u = _parse_bucket_range(l.bucket_label)
                 unit = u
+                leg_labels.append(l.bucket_label)
+                # Ignore tail sentinels for floor/ceiling
+                if low > -999:
+                    pkg_floor = min(pkg_floor, low)
+                if high < 999:
+                    pkg_ceiling = max(pkg_ceiling, high)
 
-        if not bucket_temps:
+        if pkg_floor == float("inf") or pkg_ceiling == float("-inf"):
             continue
-
-        # Package center = midpoint of min and max bucket temps
-        pkg_low = min(bucket_temps)
-        pkg_high = max(bucket_temps)
-        pkg_center = (pkg_low + pkg_high) / 2
-
-        # Collect individual leg labels and find winning bucket
-        leg_labels = [l.bucket_label for l in legs if l.bucket_label]
-        winning_leg = next((l for l in legs if l.status == "WIN"), None)
-        winning_bucket = winning_leg.bucket_label if winning_leg else f"{actual:.0f}°{unit} (outside package)"
-
-        # Miss = actual - center (positive = actual was warmer)
-        miss = actual - pkg_center
 
         # Did package win?
         won = any(l.status == "WIN" for l in legs)
         total_pnl = sum(l.net_pnl or 0 for l in legs)
 
-        # Accumulate per city
+        # Find winning bucket label
+        winning_leg = next((l for l in legs if l.status == "WIN"), None)
+        if winning_leg:
+            winning_bucket = winning_leg.bucket_label
+        else:
+            # Lost — parse the winning bucket from actual temp
+            winning_bucket = f"{actual:.0f}°{unit} (outside package)"
+
+        # Compute miss from nearest edge (only meaningful for losses)
+        if won:
+            miss = 0.0
+            miss_direction = "hit"
+        elif actual > pkg_ceiling:
+            miss = actual - pkg_ceiling
+            miss_direction = "warm"
+        elif actual < pkg_floor:
+            miss = pkg_floor - actual
+            miss_direction = "cold"
+        else:
+            # Actual inside package range but still lost? Shouldn't happen, but handle gracefully
+            miss = 0.0
+            miss_direction = "hit"
+
+        # Init city
         if city not in city_stats:
             city_stats[city] = {
                 "city": city,
@@ -936,44 +966,53 @@ async def get_city_bias():
                 "wins": 0,
                 "losses": 0,
                 "total_pnl": 0.0,
-                "miss_warm": 0,
-                "miss_cold": 0,
-                "miss_hit": 0,
-                "miss_values": [],
-                "results": [],
+                "loss_warm": 0,
+                "loss_cold": 0,
+                "loss_miss_values": [],
+                "loss_details": [],
             }
 
         cs = city_stats[city]
         cs["packages"] += 1
-        cs["wins"] += 1 if won else 0
-        cs["losses"] += 0 if won else 1
         cs["total_pnl"] = round(cs["total_pnl"] + total_pnl, 2)
-        cs["miss_values"].append(miss)
 
-        if miss > 0.5:
-            cs["miss_warm"] += 1
-        elif miss < -0.5:
-            cs["miss_cold"] += 1
+        if won:
+            cs["wins"] += 1
         else:
-            cs["miss_hit"] += 1
+            cs["losses"] += 1
+            if miss_direction == "warm":
+                cs["loss_warm"] += 1
+                cs["loss_miss_values"].append(miss)
+            elif miss_direction == "cold":
+                cs["loss_cold"] += 1
+                cs["loss_miss_values"].append(-miss)  # negative for cold
 
-        cs["results"].append({
-            "date": pkg["market_date"],
-            "package_buckets": leg_labels,
-            "package_range": f"{pkg_low:.0f}-{pkg_high:.0f}°{unit}",
-            "winning_bucket": winning_bucket,
-            "actual": actual,
-            "miss": round(miss, 1),
-            "direction": "warm" if miss > 0.5 else ("cold" if miss < -0.5 else "hit"),
-            "won": won,
-            "pnl": round(total_pnl, 2),
-        })
+            cs["loss_details"].append({
+                "date": pkg["market_date"],
+                "package_buckets": leg_labels,
+                "package_range": f"{pkg_floor:.0f}-{pkg_ceiling:.0f}°{unit}",
+                "winning_bucket": winning_bucket,
+                "actual": actual,
+                "miss": round(miss, 1),
+                "direction": miss_direction,
+                "pnl": round(total_pnl, 2),
+            })
 
     # Build summary
     summary = []
     for city, cs in sorted(city_stats.items(), key=lambda x: x[1]["packages"], reverse=True):
-        misses = cs["miss_values"]
-        avg_miss = sum(misses) / len(misses) if misses else 0
+        loss_misses = cs["loss_miss_values"]
+        avg_miss = sum(loss_misses) / len(loss_misses) if loss_misses else 0
+        # Determine dominant loss direction
+        if cs["loss_warm"] > cs["loss_cold"]:
+            bias = "warm"
+        elif cs["loss_cold"] > cs["loss_warm"]:
+            bias = "cold"
+        elif cs["losses"] == 0:
+            bias = "none"
+        else:
+            bias = "mixed"
+
         summary.append({
             "city": cs["city"],
             "unit": cs["unit"],
@@ -982,12 +1021,11 @@ async def get_city_bias():
             "losses": cs["losses"],
             "win_rate": round(cs["wins"] / cs["packages"] * 100, 1) if cs["packages"] else 0,
             "total_pnl": cs["total_pnl"],
-            "avg_miss": round(avg_miss, 1),
-            "miss_direction": "warm" if avg_miss > 0.3 else ("cold" if avg_miss < -0.3 else "neutral"),
-            "miss_warm_count": cs["miss_warm"],
-            "miss_cold_count": cs["miss_cold"],
-            "miss_hit_count": cs["miss_hit"],
-            "results": cs["results"],
+            "avg_loss_miss": round(avg_miss, 1),
+            "loss_bias": bias,
+            "loss_warm_count": cs["loss_warm"],
+            "loss_cold_count": cs["loss_cold"],
+            "loss_details": cs["loss_details"],
         })
 
     total_pkgs = sum(c["packages"] for c in summary)
