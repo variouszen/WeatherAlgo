@@ -17,7 +17,8 @@ from __future__ import annotations
 import logging
 import time
 import asyncio
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
+
 from zoneinfo import ZoneInfo
 from collections import defaultdict
 from typing import Optional
@@ -28,6 +29,7 @@ from config import (
     CITIES, STRATEGY_BANKROLL_ID, DRY_RUN, SCAN_INTERVAL_SECONDS,
     SPECTRUM_V2_CONFIG, SNIPER_YES_CONFIG, SNIPER_NO_CONFIG,
     LADDER_3_CONFIG, LADDER_5_CONFIG, ACTIVE_STRATEGIES,
+    LADDER_3_PER_CITY_SCAN_SCHEDULE,
 )
 from models.database import AsyncSessionLocal, Trade, BankrollState, ScanLog
 
@@ -226,6 +228,63 @@ def _find_peak_index(probs: dict[str, float], buckets: list) -> int:
     return best_idx
 
 
+# ── Per-city horizon helpers (Ladder 3 scan schedule) ───────────────────────
+#
+# Three pure helper functions for the per-city entry window design.
+# All three accept now_utc as a parameter so every call in a scan cycle
+# uses the same captured timestamp — no internal datetime.now() calls.
+#
+# Design: each city has a dynamic target UTC scan hour such that the day+1
+# local market is exactly 30h from close at that moment. The entry window
+# is 4 integer hours wide (target-2h through target+1h inclusive), using
+# a strict less-than on the forward side to keep the window exactly 4 hours.
+
+def _compute_entry_scan_hour(city_tz_str: str, now_utc: datetime, target_h: float = 30.0) -> int:
+    """
+    UTC hour at which this city's next local-day market will be target_h hours
+    from close. Uses now_utc (not datetime.now()) for determinism.
+
+    Example: NYC in April (UTC-4), target_h=30:
+      tomorrow midnight local = April 21 00:00 EDT = April 21 04:00 UTC
+      target_utc = April 21 04:00 UTC - 30h = April 19 22:00 UTC → returns 22
+    """
+    tz = ZoneInfo(city_tz_str)
+    today_local = now_utc.astimezone(tz).date()
+    tomorrow_midnight = datetime(
+        *(today_local + timedelta(days=1)).timetuple()[:3],
+        tzinfo=tz,
+    )
+    target_utc = tomorrow_midnight - timedelta(hours=target_h)
+    return target_utc.astimezone(ZoneInfo("UTC")).hour
+
+
+def _in_entry_window(city_tz_str: str, now_utc: datetime, window_hours: int = 4) -> bool:
+    """
+    True if now_utc falls within the city's 4-hour entry window.
+
+    Window: from (target - window_hours//2) through (target + window_hours//2 - 1),
+    using strict less-than on the forward side so the window is exactly
+    window_hours integer hours wide, not window_hours+1.
+
+    Example with target=22, window_hours=4:
+      Eligible hours: 20, 21, 22, 23 (4 hours — 00Z is correctly excluded).
+    """
+    target_hour = _compute_entry_scan_hour(city_tz_str, now_utc)
+    diff = (now_utc.hour - target_hour) % 24
+    return diff < window_hours // 2 or diff >= 24 - window_hours // 2
+
+
+def _hours_to_close(city_tz_str: str, target_date_str: str, now_utc: datetime) -> float:
+    """
+    Hours from now_utc until the end of target_date in the city's local timezone.
+    End of day = midnight starting the next local calendar day.
+    """
+    tz = ZoneInfo(city_tz_str)
+    md = date.fromisoformat(target_date_str)
+    end_local = datetime(*(md + timedelta(days=1)).timetuple()[:3], tzinfo=tz)
+    return (end_local - now_utc).total_seconds() / 3600.0
+
+
 # ── PolymarketAdapter lazy loader ────────────────────────────────────────────
 
 _adapter = None
@@ -386,6 +445,7 @@ async def run_scan_v2():
     Then settle resolved trades.
     """
     start_ms = int(time.time() * 1000)
+    now_utc = datetime.now(timezone.utc)  # captured once — used by all horizon helpers
     scan_result = {
         "started_at": datetime.now(timezone.utc).isoformat(),
         "cities_scanned": 0, "signals_found": 0,
@@ -653,35 +713,67 @@ async def run_scan_v2():
 
                     # 4d. Ladder 3
                     if "ladder_3" not in blocked_strategies:
-                        try:
-                            sig_l3 = await evaluate_ladder(
-                                buckets=buckets,
-                                ensemble_probs=ensemble_probs,
-                                gfs_peak_index=gfs_peak,
-                                ecmwf_peak_index=ecmwf_peak,
-                                bankroll=bankrolls["ladder_3"].balance,
-                                open_positions=dedup["ladder_3"],
-                                ladder_open_positions=dedup["ladder_5"],  # cross-ladder dedup
-                                venue_adapter=adapter,
-                                city=city,
-                                market_date=target_date,
-                                width=3,
-                                config=LADDER_3_CONFIG,
-                                ensemble_total_members=total_members,
-                            )
-                            if sig_l3:
-                                scan_result["signals_found"] += 1
-                                await open_v2_ladder(
-                                    session, sig_l3, bankrolls["ladder_3"],
-                                    city, target_date, station,
+                        # ── Per-city horizon gate (feature-flagged) ───────────
+                        # When LADDER_3_PER_CITY_SCAN_SCHEDULE is enabled, only
+                        # evaluate this city-date if:
+                        #   (a) city is inside its ±2h entry window (~30h target)
+                        #   (b) market_date's hours_to_close is in [24h, 38h]
+                        # All other strategies bypass this gate entirely.
+                        # now_utc is shared from scan start for determinism.
+                        _l3_eligible = True
+                        _htc = _hours_to_close(tz_name, target_date, now_utc)
+                        if LADDER_3_PER_CITY_SCAN_SCHEDULE:
+                            _in_window = _in_entry_window(tz_name, now_utc)
+                            _in_band = 24.0 <= _htc <= 38.0
+                            _l3_eligible = _in_window and _in_band
+                            _target_h = _compute_entry_scan_hour(tz_name, now_utc)
+                            if not _in_window:
+                                log(
+                                    f"ENTRY-WINDOW-SKIP [ladder_3] {city}/{target_date} "
+                                    f"h={_htc:.1f}h current={now_utc.hour:02d}Z "
+                                    f"target={_target_h:02d}Z"
                                 )
-                                dedup["ladder_3"].add((city, target_date))
-                                ladder_cross_dedup.add((city, target_date))
-                                scan_result["trades_opened"] += len(sig_l3.legs)
-                                log(f"LADDER [ladder_3] {city}/{target_date} | "
-                                    f"{len(sig_l3.legs)} legs Cost=${sig_l3.package_cost:.2f} Edge={sig_l3.package_edge:.1%}")
-                        except Exception as e:
-                            log(f"Ladder 3 eval error {city}/{target_date}: {e}", "WARN")
+                            elif not _in_band:
+                                log(
+                                    f"ENTRY-BAND-SKIP [ladder_3] {city}/{target_date} "
+                                    f"h={_htc:.1f}h (band: 24-38h)"
+                                )
+                            else:
+                                log(
+                                    f"ENTRY-CANDIDATE [ladder_3] {city}/{target_date} "
+                                    f"h={_htc:.1f}h ✓ in window+band"
+                                )
+                        if _l3_eligible:
+                            try:
+                                sig_l3 = await evaluate_ladder(
+                                    buckets=buckets,
+                                    ensemble_probs=ensemble_probs,
+                                    gfs_peak_index=gfs_peak,
+                                    ecmwf_peak_index=ecmwf_peak,
+                                    bankroll=bankrolls["ladder_3"].balance,
+                                    open_positions=dedup["ladder_3"],
+                                    ladder_open_positions=dedup["ladder_5"],
+                                    venue_adapter=adapter,
+                                    city=city,
+                                    market_date=target_date,
+                                    width=3,
+                                    config=LADDER_3_CONFIG,
+                                    ensemble_total_members=total_members,
+                                    hours_to_close=_htc,
+                                )
+                                if sig_l3:
+                                    scan_result["signals_found"] += 1
+                                    await open_v2_ladder(
+                                        session, sig_l3, bankrolls["ladder_3"],
+                                        city, target_date, station,
+                                    )
+                                    dedup["ladder_3"].add((city, target_date))
+                                    ladder_cross_dedup.add((city, target_date))
+                                    scan_result["trades_opened"] += len(sig_l3.legs)
+                                    log(f"LADDER [ladder_3] {city}/{target_date} | "
+                                        f"{len(sig_l3.legs)} legs Cost=${sig_l3.package_cost:.2f} Edge={sig_l3.package_edge:.1%}")
+                            except Exception as e:
+                                log(f"Ladder 3 eval error {city}/{target_date}: {e}", "WARN")
 
                     # 4e. Ladder 5
                     if "ladder_5" not in blocked_strategies:

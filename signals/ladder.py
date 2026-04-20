@@ -36,10 +36,13 @@ Phase 5A:
 """
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from signals import TradeSignal, LadderSignal
 from signals.fill_simulator import resolve_fill, compute_book_depth
+
+logger = logging.getLogger(__name__)
 
 
 SHARES_PER_BUCKET = 10
@@ -70,6 +73,7 @@ async def evaluate_ladder(
     config: Optional[dict] = None,
     ensemble_total_members: int = 82,
     model_run_time: Optional[str] = None,
+    hours_to_close: Optional[float] = None,
 ) -> Optional[LadderSignal]:
     """
     Evaluate a Ladder package for one city-date.
@@ -114,6 +118,28 @@ async def evaluate_ladder(
     # ── Gate 8: Bankroll floor (check early, refined after cost calc) ────
     if bankroll <= 0:
         return None
+
+    # ── Horizon outlier guard (backstop — per-city schedule is the primary fix) ──
+    # Hard-blocks only extreme outliers indicating misconfiguration or timezone bugs.
+    # The per-city entry window in scanner_v2.py is the real control mechanism.
+    # This guard is belt-and-suspenders, not the primary horizon filter.
+    if hours_to_close is not None:
+        if hours_to_close > 48:
+            logger.warning(
+                f"HORIZON-OUTLIER [hard-block] {city}/{market_date} "
+                f"h={hours_to_close:.1f}h — blocked (>48h ceiling)"
+            )
+            return None
+        if hours_to_close < 12:
+            logger.info(
+                f"HORIZON-SHORT [log-only] {city}/{market_date} "
+                f"h={hours_to_close:.1f}h — market near close, proceeding"
+            )
+        elif not (26.0 <= hours_to_close <= 34.0):
+            logger.info(
+                f"HORIZON-DRIFT [info] {city}/{market_date} "
+                f"h={hours_to_close:.1f}h — outside 26-34h core, proceeding"
+            )
 
     # ── Gate 7: City-date dedup (own + cross-ladder) ─────────────────────
     if (city, market_date) in open_positions:

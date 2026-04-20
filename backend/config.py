@@ -24,6 +24,15 @@ DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 # Override in Railway env: ACTIVE_STRATEGIES=ladder_3,sniper_yes
 ACTIVE_STRATEGIES = [s.strip() for s in os.getenv("ACTIVE_STRATEGIES", "ladder_3").split(",")]
 
+# ── Ladder 3 per-city scan schedule (horizon optimization) ────────────────────
+# When True, Ladder 3 only evaluates new entries when the city is inside its
+# designated 4-hour entry window targeting ~30h before market close, AND the
+# candidate market date's hours_to_close falls in the [24h, 38h] sweet spot.
+# All other strategies are unaffected. Settlement still runs on every cycle.
+# Enable in Railway env: LADDER_3_PER_CITY_SCAN_SCHEDULE=true
+# Default: false — flip manually after confirming startup logs look correct.
+LADDER_3_PER_CITY_SCAN_SCHEDULE = os.getenv("LADDER_3_PER_CITY_SCAN_SCHEDULE", "false").lower() == "true"
+
 # ── Ensemble config ──────────────────────────────────────────────────────────
 ENSEMBLE_MODELS = os.getenv("ENSEMBLE_MODELS", "gfs_seamless,ecmwf_ifs025")
 SCAN_SYNC_GFS_RUNS = os.getenv("SCAN_SYNC_GFS_RUNS", "true").lower() == "true"
