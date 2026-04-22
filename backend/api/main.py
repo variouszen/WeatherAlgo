@@ -1107,6 +1107,8 @@ async def get_win_leg_position():
         sorted_legs = sorted(legs, key=leg_sort_key)
         n = len(sorted_legs)
         if n < 2:
+            # 1-leg packages have no directional calibration value — skip entirely.
+            # 2-leg packages support bottom/top ranking and are included.
             continue
 
         # Find rank of winning leg (0 = bottom, n-1 = top)
@@ -1158,11 +1160,11 @@ async def get_win_leg_position():
 
         # Dominant signal
         if cs["top"] > cs["bottom"] and cs["top"] > cs["middle"]:
-            signal = "cold_bias"
-            signal_label = "⬆ Top-heavy (cold bias)"
+            signal = "shift_warmer"
+            signal_label = "⬆ Top-heavy (shift center warmer)"
         elif cs["bottom"] > cs["top"] and cs["bottom"] > cs["middle"]:
-            signal = "warm_bias"
-            signal_label = "⬇ Bottom-heavy (warm bias)"
+            signal = "shift_cooler"
+            signal_label = "⬇ Bottom-heavy (shift center cooler)"
         else:
             signal = "centered"
             signal_label = "✓ Centered"
@@ -1186,7 +1188,7 @@ async def get_win_leg_position():
 
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "note": "Which leg of the package won: bottom/middle/top by bucket rank. Top-heavy = ensemble cold bias. Bottom-heavy = warm bias.",
+        "note": "Which leg of the package won: bottom/middle/top by bucket rank. Top-heavy = shift package center warmer. Bottom-heavy = shift center cooler. 1-leg packages excluded (no directional value).",
         "overall_avg_norm_rank": overall_avg,
         "cities": summary,
     }

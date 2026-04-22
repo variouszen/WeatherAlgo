@@ -357,7 +357,7 @@ function renderWinLeg(data){
   // Table rows
   document.getElementById('winLegBody').innerHTML=cities.map(c=>{
     const sig=c.signal;
-    const sigColor=sig==='cold_bias'?'var(--orange)':sig==='warm_bias'?'var(--blue)':'var(--green)';
+    const sigColor=sig==='shift_warmer'?'var(--orange)':sig==='shift_cooler'?'var(--blue)':'var(--green)';
     // Avg rank bar: 0=bottom(blue) → 0.5=center(green) → 1=top(orange)
     const rankPct=Math.round(c.avg_norm_rank*100);
     return`<tr>
@@ -369,7 +369,7 @@ function renderWinLeg(data){
       <td>
         <div style="display:flex;align-items:center;gap:6px">
           <div style="width:80px;height:8px;background:var(--surface2);border-radius:4px;overflow:hidden">
-            <div style="width:${rankPct}%;height:100%;background:${sig==='cold_bias'?'var(--orange)':sig==='warm_bias'?'var(--blue)':'var(--green)'}"></div>
+            <div style="width:${rankPct}%;height:100%;background:${sig==='shift_warmer'?'var(--orange)':sig==='shift_cooler'?'var(--blue)':'var(--green)'}"></div>
           </div>
           <span style="font-size:11px;color:var(--text2)">${rankPct}%</span>
         </div>
@@ -386,7 +386,7 @@ function renderWinLeg(data){
     const mPct=Math.round(c.middle/total*100);
     const tPct=100-bPct-mPct;
     const sig=c.signal;
-    const sigColor=sig==='cold_bias'?'var(--orange)':sig==='warm_bias'?'var(--blue)':'var(--green)';
+    const sigColor=sig==='shift_warmer'?'var(--orange)':sig==='shift_cooler'?'var(--blue)':'var(--green)';
     bars+=`<div style="margin-bottom:12px">
       <div style="display:flex;justify-content:space-between;margin-bottom:4px">
         <span style="font-size:13px;font-weight:500">${c.city}</span>
