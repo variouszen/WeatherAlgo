@@ -1071,13 +1071,12 @@ async def receive_log_drain(request: dict):
     To disable: remove the drain URL from Railway → Settings → Log Drains.
     """
     from sqlalchemy import delete as sa_delete
-    from datetime import timezone
 
     lines = request if isinstance(request, list) else [request]
 
     async with AsyncSessionLocal() as session:
         # Auto-purge entries older than 48h on each call
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=48)
+        cutoff = datetime.utcnow() - timedelta(hours=48)
         await session.execute(
             sa_delete(LogEvent).where(LogEvent.received_at < cutoff)
         )
@@ -1106,9 +1105,8 @@ async def query_log_drain(term: str = "", hours: int = 24, limit: int = 200):
     ?term=ENTRY-CANDIDATE&hours=24&limit=200
     """
     from sqlalchemy import select as sa_select
-    from datetime import timezone
 
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    cutoff = datetime.utcnow() - timedelta(hours=hours)
 
     async with AsyncSessionLocal() as session:
         q = sa_select(LogEvent).where(LogEvent.received_at >= cutoff)
