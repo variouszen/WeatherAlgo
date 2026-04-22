@@ -1045,6 +1045,153 @@ async def get_city_bias():
     }
 
 
+# ── Win Leg Position Analysis ────────────────────────────────────────────────
+
+@app.get("/api/v2/win-leg-position")
+async def get_win_leg_position():
+    """
+    Per-city win leg position analysis from settled Ladder packages.
+    For each winning package, records whether the winning leg was the
+    bottom, middle, or top bucket in the package (sorted by bucket low).
+
+    Interpretation:
+      - Wins clustering at TOP leg → ensemble runs cold (actuals warmer than forecast)
+      - Wins clustering at BOTTOM leg → ensemble runs warm (actuals cooler than forecast)
+      - Wins centered on MIDDLE leg → well calibrated
+
+    No Wunderground data needed — uses only stored bucket_label and status.
+    Tail buckets (or_higher / or_below) included: they are inherently top/bottom.
+    """
+    async with AsyncSessionLocal() as session:
+        q = (
+            select(Trade)
+            .where(Trade.strategy.in_(["ladder_3", "ladder_5"]))
+            .where(Trade.ladder_id.isnot(None))
+            .where(Trade.status.in_(["WIN", "LOSS"]))
+            .order_by(Trade.opened_at)
+        )
+        result = await session.execute(q)
+        all_trades = result.scalars().all()
+
+    # Group into packages
+    packages = {}
+    for t in all_trades:
+        key = (t.city, t.strategy, t.ladder_id)
+        if key not in packages:
+            packages[key] = {"legs": [], "city": t.city}
+        packages[key]["legs"].append(t)
+
+    city_stats = {}
+
+    for key, pkg in packages.items():
+        city = pkg["city"]
+        legs = pkg["legs"]
+
+        # All legs must be settled
+        if any(l.status not in ("WIN", "LOSS") for l in legs):
+            continue
+
+        # Only winning packages
+        if not any(l.status == "WIN" for l in legs):
+            continue
+
+        winning_leg = next((l for l in legs if l.status == "WIN"), None)
+        if not winning_leg or not winning_leg.bucket_label:
+            continue
+
+        # Sort all legs by bucket_low to establish rank
+        def leg_sort_key(l):
+            low, high, _ = _parse_bucket_range(l.bucket_label or "")
+            return low
+
+        sorted_legs = sorted(legs, key=leg_sort_key)
+        n = len(sorted_legs)
+        if n < 2:
+            continue
+
+        # Find rank of winning leg (0 = bottom, n-1 = top)
+        win_labels = {l.bucket_label for l in legs if l.status == "WIN"}
+        win_rank = None
+        for i, l in enumerate(sorted_legs):
+            if l.bucket_label in win_labels:
+                win_rank = i
+                break
+        if win_rank is None:
+            continue
+
+        # Classify position
+        if win_rank == 0:
+            position = "bottom"
+        elif win_rank == n - 1:
+            position = "top"
+        else:
+            position = "middle"
+
+        # Normalized rank: 0.0 = bottom, 1.0 = top
+        norm_rank = win_rank / (n - 1)
+
+        unit = _parse_bucket_range(winning_leg.bucket_label)[2]
+
+        if city not in city_stats:
+            city_stats[city] = {
+                "city": city,
+                "unit": unit,
+                "count": 0,
+                "bottom": 0,
+                "middle": 0,
+                "top": 0,
+                "norm_ranks": [],
+            }
+
+        cs = city_stats[city]
+        cs["count"] += 1
+        cs[position] += 1
+        cs["norm_ranks"].append(norm_rank)
+
+    # Build summary
+    summary = []
+    for city, cs in sorted(city_stats.items(), key=lambda x: x[1]["count"], reverse=True):
+        if cs["count"] == 0:
+            continue
+
+        avg_rank = sum(cs["norm_ranks"]) / cs["count"]
+
+        # Dominant signal
+        if cs["top"] > cs["bottom"] and cs["top"] > cs["middle"]:
+            signal = "cold_bias"
+            signal_label = "⬆ Top-heavy (cold bias)"
+        elif cs["bottom"] > cs["top"] and cs["bottom"] > cs["middle"]:
+            signal = "warm_bias"
+            signal_label = "⬇ Bottom-heavy (warm bias)"
+        else:
+            signal = "centered"
+            signal_label = "✓ Centered"
+
+        summary.append({
+            "city": city,
+            "unit": cs["unit"],
+            "count": cs["count"],
+            "bottom": cs["bottom"],
+            "middle": cs["middle"],
+            "top": cs["top"],
+            "avg_norm_rank": round(avg_rank, 3),
+            "signal": signal,
+            "signal_label": signal_label,
+        })
+
+    total_ranks = []
+    for cs in city_stats.values():
+        total_ranks.extend(cs["norm_ranks"])
+    overall_avg = round(sum(total_ranks) / len(total_ranks), 3) if total_ranks else None
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "note": "Which leg of the package won: bottom/middle/top by bucket rank. Top-heavy = ensemble cold bias. Bottom-heavy = warm bias.",
+        "overall_avg_norm_rank": overall_avg,
+        "cities": summary,
+    }
+
+
 # ── Log Drain Endpoints ───────────────────────────────────────────────────────
 # Temporary monitoring endpoints — enable by pointing Railway log drain here.
 # Disable by removing the drain URL from Railway settings. No code change needed.
