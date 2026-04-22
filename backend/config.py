@@ -117,6 +117,7 @@ LADDER_3_CONFIG = {
     "max_package_cost": 10.00,     # Gate 3: $10 max package cost
     "min_package_cost": 1.00,      # Gate 3b: $1 min package cost (blocks penny packages)
     "min_leg_ask": 0.03,           # Gate 4: $0.03 min per-leg ask (blocks penny buckets)
+    "max_leg_ask": 0.95,           # Gate 4b: $0.95 max per-leg ask (blocks near-certain legs with negligible payout)
     "shares_per_bucket": 10,       # 10 shares per leg
     # Bankroll
     "bankroll_id": 6,
@@ -137,6 +138,7 @@ LADDER_5_CONFIG = {
     "max_package_cost": 10.00,
     "min_package_cost": 1.00,
     "min_leg_ask": 0.03,
+    "max_leg_ask": 0.95,
     "shares_per_bucket": 10,
     # Bankroll
     "bankroll_id": 7,
@@ -161,7 +163,7 @@ STRATEGY_BANKROLL_ID = {
 }
 
 
-# ── Cities (25) ──────────────────────────────────────────────────────────────
+# ── Cities (50) ──────────────────────────────────────────────────────────────
 INTL_DEFAULT_MODEL = "icon_seamless"
 INTL_DEFAULT_LABEL = "ICON"
 
@@ -199,6 +201,54 @@ CITIES = [
     {"name": "Sao Paulo",     "lat": -23.4313, "lon": -46.4700,  "station": "SBGR", "emoji": "🇧🇷", "celsius": True, "timezone": "America/Sao_Paulo"},
     # ── Oceania (1) ──────────────────────────────────────────────────────
     {"name": "Wellington",    "lat": -41.3272, "lon": 174.8053,  "station": "NZWN", "emoji": "🇳🇿", "celsius": True, "timezone": "Pacific/Auckland"},
+
+    # ════════════════════════════════════════════════════════════════════════════
+    # EXPANSION CITIES (25) — Session 16, Apr 2026
+    # All coordinates matched to exact Polymarket resolution station.
+    # ════════════════════════════════════════════════════════════════════════════
+
+    # ── US expansion (5) — all °F ────────────────────────────────────────────
+    {"name": "Houston",       "lat": 29.6454,  "lon": -95.2789,  "station": "KHOU", "emoji": "🤠",  "celsius": False, "timezone": "America/Chicago"},
+    {"name": "Austin",        "lat": 30.1975,  "lon": -97.6664,  "station": "KAUS", "emoji": "🎸",  "celsius": False, "timezone": "America/Chicago"},
+    {"name": "Denver",        "lat": 39.7170,  "lon": -104.7517, "station": "KBKF", "emoji": "🏔️", "celsius": False, "timezone": "America/Denver"},
+    {"name": "Los Angeles",   "lat": 33.9425,  "lon": -118.4081, "station": "KLAX", "emoji": "🎬",  "celsius": False, "timezone": "America/Los_Angeles"},
+    {"name": "San Francisco", "lat": 37.6213,  "lon": -122.3790, "station": "KSFO", "emoji": "🌉",  "celsius": False, "timezone": "America/Los_Angeles"},
+
+    # ── Europe expansion (4) ─────────────────────────────────────────────────
+    # Note: Istanbul and Moscow resolve via NOAA/weather.gov (same path as Ankara/Tel Aviv)
+    {"name": "Istanbul",      "lat": 41.2769,  "lon": 28.7519,   "station": "LTFM", "emoji": "🕌",  "celsius": True, "timezone": "Europe/Istanbul"},
+    {"name": "Moscow",        "lat": 55.5915,  "lon": 37.2615,   "station": "UUWW", "emoji": "🇷🇺", "celsius": True, "timezone": "Europe/Moscow"},
+    {"name": "Helsinki",      "lat": 60.3172,  "lon": 24.9633,   "station": "EFHK", "emoji": "🇫🇮", "celsius": True, "timezone": "Europe/Helsinki"},
+    {"name": "Amsterdam",     "lat": 52.3105,  "lon": 4.7683,    "station": "EHAM", "emoji": "🚲",  "celsius": True, "timezone": "Europe/Amsterdam"},
+
+    # ── East Asia expansion (7) ──────────────────────────────────────────────
+    {"name": "Beijing",       "lat": 40.0799,  "lon": 116.5843,  "station": "ZBAA", "emoji": "🏯",  "celsius": True, "timezone": "Asia/Shanghai"},
+    {"name": "Shenzhen",      "lat": 22.6398,  "lon": 113.8100,  "station": "ZGSZ", "emoji": "🏙️", "celsius": True, "timezone": "Asia/Shanghai"},
+    {"name": "Chengdu",       "lat": 30.5785,  "lon": 103.9467,  "station": "ZUUU", "emoji": "🐼",  "celsius": True, "timezone": "Asia/Shanghai"},
+    {"name": "Wuhan",         "lat": 30.7838,  "lon": 114.2081,  "station": "ZHHH", "emoji": "🇨🇳", "celsius": True, "timezone": "Asia/Shanghai"},
+    {"name": "Chongqing",     "lat": 29.7192,  "lon": 106.6421,  "station": "ZUCK", "emoji": "🌶️", "celsius": True, "timezone": "Asia/Shanghai"},
+    {"name": "Guangzhou",     "lat": 23.3924,  "lon": 113.2988,  "station": "ZGGG", "emoji": "🇨🇳", "celsius": True, "timezone": "Asia/Shanghai"},
+    {"name": "Busan",         "lat": 35.1795,  "lon": 128.9382,  "station": "RKPK", "emoji": "🇰🇷", "celsius": True, "timezone": "Asia/Seoul"},
+
+    # ── Southeast Asia expansion (3) ─────────────────────────────────────────
+    # Jakarta: Halim Perdanakusuma (WIHH), NOT Soekarno-Hatta (WIII)
+    {"name": "Jakarta",       "lat": -6.2661,  "lon": 106.8907,  "station": "WIHH", "emoji": "🇮🇩", "celsius": True, "timezone": "Asia/Jakarta"},
+    {"name": "Manila",        "lat": 14.5086,  "lon": 121.0200,  "station": "RPLL", "emoji": "🇵🇭", "celsius": True, "timezone": "Asia/Manila"},
+    {"name": "Kuala Lumpur",  "lat": 2.7456,   "lon": 101.7072,  "station": "WMKK", "emoji": "🇲🇾", "celsius": True, "timezone": "Asia/Kuala_Lumpur"},
+
+    # ── Middle East / South Asia expansion (2) ───────────────────────────────
+    {"name": "Jeddah",        "lat": 21.6796,  "lon": 39.1565,   "station": "OEJN", "emoji": "🕌",  "celsius": True, "timezone": "Asia/Riyadh"},
+    # Karachi: Jinnah International (OPKC) — confirmed via Wunderground URL
+    {"name": "Karachi",       "lat": 24.9008,  "lon": 67.1681,   "station": "OPKC", "emoji": "🇵🇰", "celsius": True, "timezone": "Asia/Karachi"},
+
+    # ── Africa expansion (2) ─────────────────────────────────────────────────
+    {"name": "Lagos",         "lat": 6.5774,   "lon": 3.3215,    "station": "DNMM", "emoji": "🇳🇬", "celsius": True, "timezone": "Africa/Lagos"},
+    {"name": "Cape Town",     "lat": -33.9715, "lon": 18.6022,   "station": "FACT", "emoji": "🇿🇦", "celsius": True, "timezone": "Africa/Johannesburg"},
+
+    # ── Americas expansion (2) ───────────────────────────────────────────────
+    {"name": "Mexico City",   "lat": 19.4363,  "lon": -99.0721,  "station": "MMMX", "emoji": "🇲🇽", "celsius": True, "timezone": "America/Mexico_City"},
+    # Panama City: Marcos A. Gelabert (MPMG/Albrook), NOT Tocumen (MPTO)
+    {"name": "Panama City",   "lat": 8.9795,   "lon": -79.5559,  "station": "MPMG", "emoji": "🇵🇦", "celsius": True, "timezone": "America/Panama"},
 ]
 
 # ── Model tier mapping ────────────────────────────────────────────────────────

@@ -177,11 +177,12 @@ async def fetch_ensemble_members(
                         f"[Ensemble] {model_key}: {actual} members OK"
                     )
             
+            await asyncio.sleep(0.5)  # Throttle between city fetches — prevents 429s with 50 cities
             return EnsembleFetchResult(
                 members_by_model=members_by_model,
                 dates=dates,
             )
-            
+
         except Exception as e:
             logger.warning(
                 f"[Ensemble] fetch attempt {attempt + 1} failed "

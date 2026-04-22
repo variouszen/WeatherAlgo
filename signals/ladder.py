@@ -113,6 +113,7 @@ async def evaluate_ladder(
     max_package_cost = config.get("max_package_cost", 10.00)
     min_package_cost = config.get("min_package_cost", 1.00)
     min_leg_ask = config.get("min_leg_ask", 0.03)
+    max_leg_ask = config.get("max_leg_ask", 0.95)
     shares_per_bucket = config.get("shares_per_bucket", SHARES_PER_BUCKET)
 
     # ── Gate 8: Bankroll floor (check early, refined after cost calc) ────
@@ -196,6 +197,17 @@ async def evaluate_ladder(
 
         # Gate: Per-leg minimum ask price — reject penny buckets
         if ask_price < min_leg_ask:
+            leg_fills.append({
+                "bucket": bkt,
+                "abs_index": abs_index,
+                "fill": None,
+                "offset": offset,
+            })
+            unfillable_indices.append(offset)
+            continue
+
+        # Gate: Per-leg maximum ask price — reject near-certain legs (negligible payout)
+        if ask_price >= max_leg_ask:
             leg_fills.append({
                 "bucket": bkt,
                 "abs_index": abs_index,
