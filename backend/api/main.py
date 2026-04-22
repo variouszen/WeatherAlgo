@@ -14,7 +14,7 @@ from config import SPECTRUM_V2_CONFIG, SNIPER_YES_CONFIG, SNIPER_NO_CONFIG, LADD
 from models.database import (
     init_db, AsyncSessionLocal,
     Trade, BankrollState, ScanLog, CityCalibration,
-    BucketMappingDiagnostic,
+    BucketMappingDiagnostic, LogEvent,
 )
 from core.signals import get_bankroll
 from scanner_v2 import run_scan_v2
@@ -1042,4 +1042,94 @@ async def get_city_bias():
             "total_pnl": round(total_pnl, 2),
         },
         "cities": summary,
+    }
+
+
+# ── Log Drain Endpoints ───────────────────────────────────────────────────────
+# Temporary monitoring endpoints — enable by pointing Railway log drain here.
+# Disable by removing the drain URL from Railway settings. No code change needed.
+
+KEY_TERMS = [
+    "ENTRY-CANDIDATE",
+    "LADDER [ladder_3]",
+    "ENTRY-WINDOW-SKIP",
+    "HORIZON-OUTLIER",
+    "429",
+    "Scan complete",
+    "STALE?",
+    "RESOLVED",
+    "all attempts failed",
+    "[ERROR]",
+    "SETTLE-DEBUG",
+]
+
+@app.post("/internal/log-drain")
+async def receive_log_drain(request: dict):
+    """
+    Railway log drain webhook receiver.
+    Stores key events to log_events table. Auto-purges entries older than 48h.
+    To disable: remove the drain URL from Railway → Settings → Log Drains.
+    """
+    from sqlalchemy import delete as sa_delete
+    from datetime import timezone
+
+    lines = request if isinstance(request, list) else [request]
+
+    async with AsyncSessionLocal() as session:
+        # Auto-purge entries older than 48h on each call
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=48)
+        await session.execute(
+            sa_delete(LogEvent).where(LogEvent.received_at < cutoff)
+        )
+
+        # Store key event lines only — skip noise
+        for line in lines:
+            message = line.get("message") or line.get("msg") or str(line)
+            matched = next((t for t in KEY_TERMS if t in message), None)
+            if matched:
+                session.add(LogEvent(
+                    log_timestamp=str(line.get("timestamp") or line.get("ts", "")),
+                    service=str(line.get("service", "")),
+                    matched_term=matched,
+                    message=message[:2000],  # cap at 2000 chars
+                ))
+
+        await session.commit()
+
+    return {"ok": True}
+
+
+@app.get("/internal/log-drain")
+async def query_log_drain(term: str = "", hours: int = 24, limit: int = 200):
+    """
+    Query recent log events.
+    ?term=ENTRY-CANDIDATE&hours=24&limit=200
+    """
+    from sqlalchemy import select as sa_select
+    from datetime import timezone
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+
+    async with AsyncSessionLocal() as session:
+        q = sa_select(LogEvent).where(LogEvent.received_at >= cutoff)
+        if term:
+            q = q.where(LogEvent.matched_term == term)
+        q = q.order_by(LogEvent.received_at.desc()).limit(limit)
+        result = await session.execute(q)
+        rows = result.scalars().all()
+
+    return {
+        "count": len(rows),
+        "hours": hours,
+        "term_filter": term or "all",
+        "events": [
+            {
+                "id": r.id,
+                "received_at": r.received_at.isoformat() if r.received_at else None,
+                "log_timestamp": r.log_timestamp,
+                "matched_term": r.matched_term,
+                "message": r.message,
+            }
+            for r in rows
+        ],
     }

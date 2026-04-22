@@ -193,6 +193,22 @@ class BucketMappingDiagnostic(Base):
     polymarket_market_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
 
 
+class LogEvent(Base):
+    """
+    Temporary log drain table — receives Railway log lines via POST /internal/log-drain.
+    Intended for short-term monitoring (a day or two). Disable by removing the
+    Railway log drain URL. Auto-purges entries older than 48h on each drain call.
+    """
+    __tablename__ = "log_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    log_timestamp: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    service: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    matched_term: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    message: Mapped[str] = mapped_column(Text)
+
+
 async def init_db():
     """Create all tables on startup. Safe to call multiple times."""
     async with engine.begin() as conn:
