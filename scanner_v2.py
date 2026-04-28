@@ -712,7 +712,7 @@ async def run_scan_v2():
                         # runs update rather than a single 4-hour window.
                         # The 24-36h band is the sole horizon control.
                         _htc = _hours_to_close(tz_name, target_date, now_utc)
-                        _in_band = 24.0 <= _htc <= 36.0
+                        _in_band = 24.0 <= _htc < 36.0
                         _l3_eligible = _in_band
                         if not _in_band:
                             log(

@@ -118,6 +118,10 @@ async def evaluate_ladder(
 
     # ── Gate 8: Bankroll floor (check early, refined after cost calc) ────
     if bankroll <= 0:
+        logger.info(
+            f"LADDER-REJECT [ladder_{width}] {city}/{market_date} "
+            f"reason=bankroll_zero bankroll=${bankroll:.2f}"
+        )
         return None
 
     # ── Horizon outlier guard (backstop — per-city schedule is the primary fix) ──
@@ -136,7 +140,7 @@ async def evaluate_ladder(
                 f"HORIZON-SHORT [log-only] {city}/{market_date} "
                 f"h={hours_to_close:.1f}h — market near close, proceeding"
             )
-        elif not (24.0 <= hours_to_close <= 36.0):
+        elif not (24.0 <= hours_to_close < 36.0):
             logger.info(
                 f"HORIZON-DRIFT [info] {city}/{market_date} "
                 f"h={hours_to_close:.1f}h — outside 24-36h band, proceeding"
@@ -144,13 +148,26 @@ async def evaluate_ladder(
 
     # ── Gate 7: City-date dedup (own + cross-ladder) ─────────────────────
     if (city, market_date) in open_positions:
+        logger.info(
+            f"LADDER-REJECT [ladder_{width}] {city}/{market_date} "
+            f"reason=dedup_existing"
+        )
         return None
     # Two Ladders on same city-date not allowed
     if (city, market_date) in ladder_open_positions:
+        logger.info(
+            f"LADDER-REJECT [ladder_{width}] {city}/{market_date} "
+            f"reason=cross_ladder_dedup"
+        )
         return None
 
     # ── Gate 6: Multi-model agreement ────────────────────────────────────
     if abs(gfs_peak_index - ecmwf_peak_index) > 2:
+        logger.info(
+            f"LADDER-REJECT [{strategy_name}] {city}/{market_date} "
+            f"reason=model_disagreement gfs={gfs_peak_index} ecmwf={ecmwf_peak_index} "
+            f"diff={abs(gfs_peak_index - ecmwf_peak_index)}"
+        )
         return None
 
     # ── Find combined peak ───────────────────────────────────────────────
@@ -182,10 +199,12 @@ async def evaluate_ladder(
     # Gate 5: No internal gaps — window must have exactly `width` contiguous buckets
     window_buckets = buckets[window_start:window_end + 1]
     if len(window_buckets) < width:
-        # Not enough buckets at edge of range — try with what we have
-        # but at minimum need 2 for a valid reduced ladder
-        if len(window_buckets) < 2:
-            return None
+        logger.info(
+            f"LADDER-REJECT [{strategy_name}] {city}/{market_date} "
+            f"reason=window_too_small window={len(window_buckets)} required={width} "
+            f"peak_idx={combined_peak_index} gfs={gfs_peak_index} ecmwf={ecmwf_peak_index}"
+        )
+        return None
 
     # ── Gate 4: Fillability — test each bucket independently ─────────────
     # Ladders are YES only — skip any bucket where YES side is dead
@@ -263,6 +282,11 @@ async def evaluate_ladder(
 
     if len(unfillable_indices) >= 2:
         # 2+ buckets unfillable → REJECT
+        logger.info(
+            f"LADDER-REJECT [{strategy_name}] {city}/{market_date} "
+            f"reason=unfillable_2+ unfillable={unfillable_indices} "
+            f"gfs={gfs_peak_index} ecmwf={ecmwf_peak_index}"
+        )
         return None
 
     if len(unfillable_indices) == 1:
@@ -270,17 +294,30 @@ async def evaluate_ladder(
 
         if unfillable == peak_offset:
             # Peak bucket unfillable → REJECT
+            logger.info(
+                f"LADDER-REJECT [{strategy_name}] {city}/{market_date} "
+                f"reason=peak_unfillable peak_offset={peak_offset} "
+                f"gfs={gfs_peak_index} ecmwf={ecmwf_peak_index}"
+            )
             return None
 
         # 1 tail bucket unfillable → proceed with reduced ladder
         leg_fills = [lf for lf in leg_fills if lf["offset"] != unfillable]
 
     if not leg_fills:
+        logger.info(
+            f"LADDER-REJECT [{strategy_name}] {city}/{market_date} "
+            f"reason=no_valid_fills gfs={gfs_peak_index} ecmwf={ecmwf_peak_index}"
+        )
         return None
 
     # Filter out any entries with no fill (shouldn't happen after above, but defensive)
     leg_fills = [lf for lf in leg_fills if lf["fill"] is not None and lf["fill"].filled]
     if not leg_fills:
+        logger.info(
+            f"LADDER-REJECT [{strategy_name}] {city}/{market_date} "
+            f"reason=no_valid_fills_post_filter gfs={gfs_peak_index} ecmwf={ecmwf_peak_index}"
+        )
         return None
 
     # ── Package math ─────────────────────────────────────────────────────
@@ -348,22 +385,49 @@ async def evaluate_ladder(
 
     # ── Gate 1: Minimum package edge ─────────────────────────────────────
     if package_edge < min_package_edge:
+        logger.info(
+            f"LADDER-REJECT [{strategy_name}] {city}/{market_date} "
+            f"reason=edge_low edge={package_edge:.1%} min={min_package_edge:.1%} "
+            f"prob={package_prob:.1%} cost=${package_cost:.2f} "
+            f"gfs={gfs_peak_index} ecmwf={ecmwf_peak_index} peak_idx={combined_peak_index}"
+        )
         return None
 
     # ── Gate 2: Minimum package prob ─────────────────────────────────────
     if package_prob < min_package_prob:
+        logger.info(
+            f"LADDER-REJECT [{strategy_name}] {city}/{market_date} "
+            f"reason=prob_low prob={package_prob:.1%} min={min_package_prob:.1%} "
+            f"edge={package_edge:.1%} cost=${package_cost:.2f} "
+            f"gfs={gfs_peak_index} ecmwf={ecmwf_peak_index} peak_idx={combined_peak_index}"
+        )
         return None
 
     # ── Gate 3: Maximum package cost ─────────────────────────────────────
     if package_cost > max_package_cost:
+        logger.info(
+            f"LADDER-REJECT [{strategy_name}] {city}/{market_date} "
+            f"reason=cost_high cost=${package_cost:.2f} max=${max_package_cost:.2f} "
+            f"gfs={gfs_peak_index} ecmwf={ecmwf_peak_index}"
+        )
         return None
 
     # ── Gate 3b: Minimum package cost ────────────────────────────────────
     if package_cost < min_package_cost:
+        logger.info(
+            f"LADDER-REJECT [{strategy_name}] {city}/{market_date} "
+            f"reason=cost_low cost=${package_cost:.2f} min=${min_package_cost:.2f} "
+            f"gfs={gfs_peak_index} ecmwf={ecmwf_peak_index}"
+        )
         return None
 
     # ── Gate 8 (refined): Bankroll >= package_cost ───────────────────────
     if bankroll < package_cost:
+        logger.info(
+            f"LADDER-REJECT [{strategy_name}] {city}/{market_date} "
+            f"reason=bankroll_floor bankroll=${bankroll:.2f} cost=${package_cost:.2f} "
+            f"gfs={gfs_peak_index} ecmwf={ecmwf_peak_index}"
+        )
         return None
 
     # ── Stamp package-level fields on each leg ───────────────────────────
@@ -373,6 +437,15 @@ async def evaluate_ladder(
         leg.package_edge = package_edge
         leg.num_legs = len(legs)
         leg.edge = package_edge  # Use package edge for logging
+
+    bucket_labels = [leg.bucket_label for leg in legs]
+    logger.info(
+        f"LADDER-PASS [{strategy_name}] {city}/{market_date} "
+        f"legs={len(legs)} cost=${package_cost:.2f} prob={package_prob:.1%} "
+        f"edge={package_edge:.1%} peak_idx={combined_peak_index} "
+        f"gfs={gfs_peak_index} ecmwf={ecmwf_peak_index} "
+        f"buckets={bucket_labels}"
+    )
 
     return LadderSignal(
         strategy=strategy_name,

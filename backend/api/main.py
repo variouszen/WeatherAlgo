@@ -2,6 +2,7 @@
 import logging
 import asyncio
 from datetime import datetime, date, timezone, timedelta
+from typing import Any
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,6 +23,8 @@ import httpx
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 app = FastAPI(title="Weather Arb Bot", version="2.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -1200,8 +1203,11 @@ async def get_win_leg_position():
 
 KEY_TERMS = [
     "ENTRY-CANDIDATE",
-    "LADDER [ladder_3]",
-    "ENTRY-WINDOW-SKIP",
+    "ENTRY-BAND-SKIP",
+    "LADDER-REJECT",
+    "LADDER-PASS",
+    "[LADDER] OPEN",
+    "[TRADE] OPEN",
     "HORIZON-OUTLIER",
     "429",
     "Scan complete",
@@ -1213,7 +1219,7 @@ KEY_TERMS = [
 ]
 
 @app.post("/internal/log-drain")
-async def receive_log_drain(request: dict):
+async def receive_log_drain(request: Any):
     """
     Railway log drain webhook receiver.
     Stores key events to log_events table. Auto-purges entries older than 48h.
@@ -1232,12 +1238,19 @@ async def receive_log_drain(request: dict):
 
         # Store key event lines only — skip noise
         for line in lines:
-            message = line.get("message") or line.get("msg") or str(line)
+            if isinstance(line, dict):
+                message = line.get("message") or line.get("msg") or str(line)
+                timestamp = str(line.get("timestamp") or line.get("ts", ""))
+                service = str(line.get("service", ""))
+            else:
+                message = str(line)
+                timestamp = ""
+                service = ""
             matched = next((t for t in KEY_TERMS if t in message), None)
             if matched:
                 session.add(LogEvent(
-                    log_timestamp=str(line.get("timestamp") or line.get("ts", "")),
-                    service=str(line.get("service", "")),
+                    log_timestamp=timestamp,
+                    service=service,
                     matched_term=matched,
                     message=message[:2000],  # cap at 2000 chars
                 ))
