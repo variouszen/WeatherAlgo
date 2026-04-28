@@ -29,7 +29,7 @@ from config import (
     CITIES, STRATEGY_BANKROLL_ID, DRY_RUN, SCAN_INTERVAL_SECONDS,
     SPECTRUM_V2_CONFIG, SNIPER_YES_CONFIG, SNIPER_NO_CONFIG,
     LADDER_3_CONFIG, LADDER_5_CONFIG, ACTIVE_STRATEGIES,
-    LADDER_3_PER_CITY_SCAN_SCHEDULE,
+    SCAN_SYNC_GFS_RUNS,
 )
 from models.database import AsyncSessionLocal, Trade, BankrollState, ScanLog
 
@@ -260,18 +260,11 @@ def _compute_entry_scan_hour(city_tz_str: str, now_utc: datetime, target_h: floa
 
 def _in_entry_window(city_tz_str: str, now_utc: datetime, window_hours: int = 4) -> bool:
     """
-    True if now_utc falls within the city's 4-hour entry window.
-
-    Window: from (target - window_hours//2) through (target + window_hours//2 - 1),
-    using strict less-than on the forward side so the window is exactly
-    window_hours integer hours wide, not window_hours+1.
-
-    Example with target=22, window_hours=4:
-      Eligible hours: 20, 21, 22, 23 (4 hours — 00Z is correctly excluded).
+    DEPRECATED (Session 17) — entry window gate removed.
+    Cities now evaluated during full 24-36h horizon band.
+    Kept for reference only — not called anywhere.
     """
-    target_hour = _compute_entry_scan_hour(city_tz_str, now_utc)
-    diff = (now_utc.hour - target_hour) % 24
-    return diff < window_hours // 2 or diff >= 24 - window_hours // 2
+    return True
 
 
 def _hours_to_close(city_tz_str: str, target_date_str: str, now_utc: datetime) -> float:
@@ -461,7 +454,6 @@ async def run_scan_v2():
     reset_ladder_counter()
 
     # ── GFS scan sync: decide fresh ensemble vs cached signal ────────
-    from config import SCAN_SYNC_GFS_RUNS
     gfs_eligible, gfs_reason = is_in_gfs_scan_window()
     refresh_ensemble = gfs_eligible or not SCAN_SYNC_GFS_RUNS
     if refresh_ensemble:
@@ -525,7 +517,7 @@ async def run_scan_v2():
                 # returns dates in local time (timezone=auto), so target_date must
                 # align with that. Using UTC date causes day+1 overshoot for US
                 # cities during early-morning UTC hours (00:00-08:00 UTC).
-                local_today = datetime.now(ZoneInfo(tz_name)).date()
+                local_today = now_utc.astimezone(ZoneInfo(tz_name)).date()
 
                 for day_offset in [0, 1]:
                     target_date = (local_today + timedelta(days=day_offset)).isoformat()
@@ -533,7 +525,7 @@ async def run_scan_v2():
                     # ── Noon local-time guard (day+0 only) ───────────────
                     if day_offset == 0:
                         try:
-                            local_now = datetime.now(timezone.utc).astimezone(ZoneInfo(tz_name))
+                            local_now = now_utc.astimezone(ZoneInfo(tz_name))
                             if local_now.hour >= 12:
                                 log(f"SKIP {city}/{target_date} | Day-0 past noon local ({local_now.strftime('%H:%M')} {tz_name})")
                                 continue
@@ -713,36 +705,25 @@ async def run_scan_v2():
 
                     # 4d. Ladder 3
                     if "ladder_3" not in blocked_strategies:
-                        # ── Per-city horizon gate (feature-flagged) ───────────
-                        # When LADDER_3_PER_CITY_SCAN_SCHEDULE is enabled, only
-                        # evaluate this city-date if:
-                        #   (a) city is inside its ±2h entry window (~30h target)
-                        #   (b) market_date's hours_to_close is in [24h, 38h]
-                        # All other strategies bypass this gate entirely.
-                        # now_utc is shared from scan start for determinism.
-                        _l3_eligible = True
+                        # ── Horizon band gate (24-36h only) ──────────────────
+                        # Entry window removed (Session 17): cities now get
+                        # evaluated every scan during their full 24-36h band.
+                        # This gives each city multiple looks per day as GFS
+                        # runs update rather than a single 4-hour window.
+                        # The 24-36h band is the sole horizon control.
                         _htc = _hours_to_close(tz_name, target_date, now_utc)
-                        if LADDER_3_PER_CITY_SCAN_SCHEDULE:
-                            _in_window = _in_entry_window(tz_name, now_utc)
-                            _in_band = 24.0 <= _htc <= 38.0
-                            _l3_eligible = _in_window and _in_band
-                            _target_h = _compute_entry_scan_hour(tz_name, now_utc)
-                            if not _in_window:
-                                log(
-                                    f"ENTRY-WINDOW-SKIP [ladder_3] {city}/{target_date} "
-                                    f"h={_htc:.1f}h current={now_utc.hour:02d}Z "
-                                    f"target={_target_h:02d}Z"
-                                )
-                            elif not _in_band:
-                                log(
-                                    f"ENTRY-BAND-SKIP [ladder_3] {city}/{target_date} "
-                                    f"h={_htc:.1f}h (band: 24-38h)"
-                                )
-                            else:
-                                log(
-                                    f"ENTRY-CANDIDATE [ladder_3] {city}/{target_date} "
-                                    f"h={_htc:.1f}h ✓ in window+band"
-                                )
+                        _in_band = 24.0 <= _htc <= 36.0
+                        _l3_eligible = _in_band
+                        if not _in_band:
+                            log(
+                                f"ENTRY-BAND-SKIP [ladder_3] {city}/{target_date} "
+                                f"h={_htc:.1f}h (band: 24-36h)"
+                            )
+                        else:
+                            log(
+                                f"ENTRY-CANDIDATE [ladder_3] {city}/{target_date} "
+                                f"h={_htc:.1f}h ✓ in band"
+                            )
                         if _l3_eligible:
                             try:
                                 sig_l3 = await evaluate_ladder(

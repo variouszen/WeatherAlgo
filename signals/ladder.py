@@ -136,10 +136,10 @@ async def evaluate_ladder(
                 f"HORIZON-SHORT [log-only] {city}/{market_date} "
                 f"h={hours_to_close:.1f}h — market near close, proceeding"
             )
-        elif not (26.0 <= hours_to_close <= 34.0):
+        elif not (24.0 <= hours_to_close <= 36.0):
             logger.info(
                 f"HORIZON-DRIFT [info] {city}/{market_date} "
-                f"h={hours_to_close:.1f}h — outside 26-34h core, proceeding"
+                f"h={hours_to_close:.1f}h — outside 24-36h band, proceeding"
             )
 
     # ── Gate 7: City-date dedup (own + cross-ladder) ─────────────────────
@@ -161,6 +161,19 @@ async def evaluate_ladder(
         if p > best_prob:
             best_prob = p
             combined_peak_index = i
+
+    # ── Warm bias correction ─────────────────────────────────────────────
+    # GFS/ECMWF ensemble systematically underestimates warm outcomes in spring.
+    # Validated: 31 warm misses vs 2 cold misses across 33 losing packages.
+    # Shift peak index up by warm_bias_offset before building the window.
+    # Clamped to last valid bucket index to prevent out-of-range window.
+    bias_offset = config.get("warm_bias_offset", 0)
+    if bias_offset:
+        combined_peak_index = min(combined_peak_index + bias_offset, len(buckets) - 1)
+        logger.debug(
+            f"[Ladder] {city}/{market_date} warm_bias_offset={bias_offset} "
+            f"→ peak shifted to index {combined_peak_index}"
+        )
 
     # ── Build window: peak ± half_width ──────────────────────────────────
     window_start = max(0, combined_peak_index - half_width)

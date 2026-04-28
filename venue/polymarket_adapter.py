@@ -5,7 +5,7 @@ Implements VenueAdapter for Polymarket's CLOB (Central Limit Order Book).
 
 Discovery: Gamma API slug-based fetch → parse buckets → CLOB prices
 Pricing: CLOB get_price(side=BUY) = truth, get_order_book() = depth
-Execution: py-clob-client with neg_risk=True, tick_size="0.001"
+Execution: py-clob-client-v2 (Phase 6 — requires POLYMARKET_PRIVATE_KEY)
 Settlement: Polymarket resolution check (binary outcome prices)
 Paper mode: DRY_RUN=true logs order to DB, skips CLOB submission
 
@@ -321,7 +321,7 @@ class PolymarketAdapter(VenueAdapter):
             price_str = data.get("price")
             if price_str is not None:
                 price = float(price_str)
-                if 0.0 < price < 1.0:
+                if 0.0 < price <= 1.0:
                     return price
             return None
 
@@ -399,7 +399,9 @@ class PolymarketAdapter(VenueAdapter):
         Place an order on Polymarket.
 
         In DRY_RUN mode: returns simulated success without submitting.
-        In live mode: uses py-clob-client with neg_risk=True, tick_size="0.001".
+        In live mode (Phase 6): uses py-clob-client-v2 with POLYMARKET_PRIVATE_KEY.
+        V2 order fields: timestamp (ms), no feeRateBps/nonce/taker.
+        Collateral: pUSD (wrap USDC.e before trading).
         """
         if self.dry_run:
             # Paper trade — simulate fill at max_price
@@ -416,14 +418,77 @@ class PolymarketAdapter(VenueAdapter):
                 dry_run=True,
             )
 
-        # ── Live execution (future — requires POLYMARKET_PRIVATE_KEY) ─────
+        # ── Live execution — Polymarket CLOB V2 ──────────────────────────
+        #
+        # Phase 6 implementation using py-clob-client-v2 (pip install py-clob-client-v2).
+        # Requires POLYMARKET_PRIVATE_KEY in Railway environment variables.
+        #
+        # V2 SDK changes from V1:
+        #   - Import path: py_clob_client_v2 (not py_clob_client)
+        #   - Constructor: keyword args (host=, chain_id=, key=, creds=)
+        #   - Order fields: OrderArgs dataclass; no feeRateBps/nonce/taker
+        #   - Fees: protocol-set at match time, not embedded in order
+        #   - Collateral: pUSD (wrap USDC.e via Collateral Onramp before trading)
+        #
+        # When Phase 6 is ready, implement as follows:
+        #
+        #   from py_clob_client_v2 import (
+        #       ClobClient, ApiCreds, OrderArgs,
+        #       OrderType, PartialCreateOrderOptions, Side,
+        #   )
+        #
+        #   private_key = os.getenv("POLYMARKET_PRIVATE_KEY")
+        #   if not private_key:
+        #       logger.error("[Adapter] POLYMARKET_PRIVATE_KEY not set")
+        #       return OrderResult(success=False, error="No private key")
+        #
+        #   client = ClobClient(
+        #       host=CLOB_API_BASE,
+        #       chain_id=137,           # Polygon mainnet
+        #       key=private_key,
+        #   )
+        #   creds = client.create_or_derive_api_key()
+        #   client = ClobClient(
+        #       host=CLOB_API_BASE,
+        #       chain_id=137,
+        #       key=private_key,
+        #       creds=creds,
+        #   )
+        #
+        #   resp = client.create_and_post_order(
+        #       order_args=OrderArgs(
+        #           token_id=token_id,
+        #           price=max_price,
+        #           side=Side.BUY if side == "BUY" else Side.SELL,
+        #           size=amount_usd / max_price,
+        #       ),
+        #       options=PartialCreateOrderOptions(tick_size="0.01"),
+        #       order_type=OrderType.GTC,
+        #   )
+        #
+        #   return OrderResult(
+        #       success=resp.get("success", False),
+        #       order_id=resp.get("orderID", ""),
+        #       filled_size=amount_usd / max_price,
+        #       filled_price=max_price,
+        #       dry_run=False,
+        #   )
+        #
+        # Pre-requisites before enabling:
+        #   1. Rotate Railway PostgreSQL password
+        #   2. Set POLYMARKET_PRIVATE_KEY in Railway env
+        #   3. Wrap USDC.e → pUSD via Collateral Onramp contract
+        #   4. Verify feesEnabled on live weather market objects
+        #   5. Wire fee accounting into EV calculations
+        #   6. Set DRY_RUN=false in Railway env
+
         logger.error(
-            "[Adapter] Live execution not yet implemented. "
-            "Set DRY_RUN=true or implement py-clob-client integration."
+            "[Adapter] Live execution not yet implemented — Phase 6 prerequisite. "
+            "POLYMARKET_PRIVATE_KEY not set. Set DRY_RUN=true for paper trading."
         )
         return OrderResult(
             success=False,
-            error="Live execution not implemented",
+            error="Live execution not implemented — see Phase 6 prerequisites",
         )
 
     async def cancel_order(self, order_id: str) -> bool:
@@ -432,8 +497,8 @@ class PolymarketAdapter(VenueAdapter):
             logger.info(f"[Adapter] DRY_RUN cancel: {order_id}")
             return True
 
-        # Live cancellation via py-clob-client (future)
-        logger.error("[Adapter] Live cancel not yet implemented")
+        # Phase 6: implement via py-clob-client-v2 client.cancel(order_id)
+        logger.error("[Adapter] Live cancel not yet implemented — Phase 6")
         return False
 
     async def get_positions(self) -> List[Dict]:
@@ -441,7 +506,7 @@ class PolymarketAdapter(VenueAdapter):
         if self.dry_run:
             return []  # Paper positions tracked in DB, not on venue
 
-        # Live positions via py-clob-client (future)
+        # Phase 6: implement via py-clob-client-v2 client.get_positions()
         return []
 
     # ── Settlement ────────────────────────────────────────────────────────────

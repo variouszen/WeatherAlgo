@@ -119,6 +119,11 @@ LADDER_3_CONFIG = {
     "min_leg_ask": 0.03,           # Gate 4: $0.03 min per-leg ask (blocks penny buckets)
     "max_leg_ask": 0.95,           # Gate 4b: $0.95 max per-leg ask (blocks near-certain legs with negligible payout)
     "shares_per_bucket": 10,       # 10 shares per leg
+    # Warm bias correction (Session 17)
+    # GFS/ECMWF ensemble systematically underestimates warm outcomes in spring.
+    # Shifts the combined peak index +N buckets before window construction.
+    # Validated against 33 losing packages: 31 warm misses vs 2 cold misses.
+    "warm_bias_offset": 1,         # +1 bucket shift on peak before window build
     # Bankroll
     "bankroll_id": 6,
     "starting_bankroll": 500.0,
